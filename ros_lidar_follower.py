@@ -53,6 +53,12 @@ class JetBotController:
         self.latest_scan = None
         self.latest_image = None
         self.detector = SimpleOppositeDetector()
+        
+        # Initialize angle analyzer for line/lidar comparison
+        self.angle_analysis_enabled = True
+        self.last_angle_analysis_time = 0
+        self.angle_analysis_interval = 2.0  # Analyze every 2 seconds
+        
         rospy.Subscriber('/scan', LaserScan, self.detector.callback)
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
         rospy.loginfo("Đã đăng ký vào các topic /scan và /csi_cam_0/image_raw.")
@@ -385,6 +391,10 @@ class JetBotController:
                     
                     # An toàn để bám line, vì chúng ta biết phía trước không có giao lộ đột ngột.
                     self.correct_course(execution_line_center)
+                    
+                    # Phân tích và in góc line (nếu được bật)
+                    if self.angle_analysis_enabled:
+                        self.analyze_and_print_line_angles()
                 else:
                     # Trường hợp hiếm: ROI xa thấy line nhưng ROI gần lại không. Dừng lại cho an toàn.
                     rospy.logwarn("Trạng thái không nhất quán: ROI xa thấy line, ROI gần không thấy. Tạm dừng an toàn.")
@@ -612,6 +622,210 @@ class JetBotController:
         
         rospy.loginfo(f"Line validation: center={line_center}, deviation={deviation:.1f}, max_allowed={max_deviation:.1f}, valid={is_valid}")
         return is_valid
+    
+    def calculate_line_angle_from_camera(self):
+        """
+        Tính góc của line từ camera dựa trên vị trí trọng tâm.
+        Returns: (angle_degrees, confidence)
+        """
+        line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+        if line_center is None:
+            return None, "NO_LINE_DETECTED"
+        
+        image_center = self.WIDTH / 2
+        pixel_offset = line_center - image_center
+        
+        # Chuyển đổi pixel offset thành góc (sử dụng FOV 60 degrees)
+        camera_fov = 60
+        angle = (pixel_offset / image_center) * (camera_fov / 2)
+        
+        # Đánh giá confidence
+        if abs(angle) < 3:
+            confidence = "HIGH"
+        elif abs(angle) < 10:
+            confidence = "MEDIUM"
+        else:
+            confidence = "LOW"
+        
+        return angle, confidence
+    
+    def find_line_clusters_in_lidar(self):
+        """
+        Tìm các clusters có thể là line trong dữ liệu LiDAR.
+        """
+        if self.detector.latest_scan is None:
+            return []
+        
+        scan = self.detector.latest_scan
+        ranges = np.array(scan.ranges)
+        n = len(ranges)
+        
+        angle_increment_deg = math.degrees(scan.angle_increment)
+        points_per_range = int(self.detector.angle_range / angle_increment_deg)
+        
+        line_clusters = []
+        front_angle_range = 45  # ±45 degrees
+        
+        # Quét theo từng zone ở phía trước
+        for start_idx in range(0, n, points_per_range // 2):
+            end_idx = min(start_idx + points_per_range, n)
+            if end_idx - start_idx < points_per_range // 2:
+                continue
+            
+            center_idx = start_idx + (end_idx - start_idx) // 2
+            center_angle = self.detector.index_to_angle(center_idx, scan)
+            
+            # Chỉ xét các zone ở phía trước
+            if abs(center_angle) <= front_angle_range:
+                cluster = self.detect_line_cluster_in_zone(ranges[start_idx:end_idx], center_angle)
+                if cluster:
+                    line_clusters.append(cluster)
+        
+        return line_clusters
+    
+    def detect_line_cluster_in_zone(self, zone_ranges, center_angle):
+        """
+        Phát hiện line cluster trong một zone.
+        """
+        if len(zone_ranges) == 0:
+            return None
+        
+        # Lọc các điểm hợp lệ (tăng range để detect line xa hơn)
+        min_dist, max_dist = 0.15, 2.0
+        valid_mask = ((zone_ranges >= min_dist) & 
+                     (zone_ranges <= max_dist) & 
+                     np.isfinite(zone_ranges))
+        
+        if np.sum(valid_mask) < 5:  # Ít nhất 5 điểm
+            return None
+        
+        valid_ranges = zone_ranges[valid_mask]
+        
+        # Kiểm tra đặc điểm line: khoảng cách tương đối đồng đều
+        distance_variance = np.var(valid_ranges)
+        
+        if distance_variance <= 0.4:  # Line có variance thấp
+            return {
+                'center_angle': center_angle,
+                'distance': np.mean(valid_ranges),
+                'point_count': len(valid_ranges),
+                'variance': distance_variance
+            }
+        
+        return None
+    
+    def calculate_line_angle_from_lidar(self):
+        """
+        Tính góc của line dựa trên các clusters từ LiDAR.
+        """
+        line_clusters = self.find_line_clusters_in_lidar()
+        
+        if len(line_clusters) < 1:
+            return None, "NO_CLUSTERS_FOUND"
+        
+        # Weighted average dựa trên số điểm và khoảng cách
+        angles = [cluster['center_angle'] for cluster in line_clusters]
+        distances = [cluster['distance'] for cluster in line_clusters]
+        point_counts = [cluster['point_count'] for cluster in line_clusters]
+        
+        # Tính trọng số (gần hơn và nhiều điểm hơn = trọng số cao hơn)
+        weights = []
+        for i in range(len(line_clusters)):
+            weight = point_counts[i] / (distances[i] + 0.1)
+            weights.append(weight)
+        
+        weights = np.array(weights)
+        if np.sum(weights) > 0:
+            weights = weights / np.sum(weights)  # Normalize
+            weighted_angle = np.average(angles, weights=weights)
+        else:
+            weighted_angle = np.mean(angles)
+        
+        # Đánh giá confidence
+        if len(line_clusters) >= 3:
+            confidence = "HIGH"
+        elif len(line_clusters) >= 2:
+            confidence = "MEDIUM"
+        else:
+            confidence = "LOW"
+        
+        return weighted_angle, confidence
+    
+    def analyze_and_print_line_angles(self):
+        """
+        Phân tích và in ra góc line từ camera và LiDAR.
+        """
+        current_time = rospy.get_time()
+        
+        # Chỉ phân tích mỗi interval seconds
+        if current_time - self.last_angle_analysis_time < self.angle_analysis_interval:
+            return
+        
+        self.last_angle_analysis_time = current_time
+        
+        camera_angle, camera_conf = self.calculate_line_angle_from_camera()
+        lidar_angle, lidar_conf = self.calculate_line_angle_from_lidar()
+        
+        print("\n" + "="*60)
+        print("🔍 LINE ANGLE ANALYSIS")
+        print(f"⏰ Time: {current_time:.1f}s")
+        print("="*60)
+        
+        # Camera Analysis
+        print(f"📷 CAMERA:")
+        if camera_angle is not None:
+            print(f"   • Angle: {camera_angle:+6.2f}° ({camera_conf})")
+            if camera_angle > 5:
+                print(f"   • Direction: RIGHT (line to the right)")
+            elif camera_angle < -5:
+                print(f"   • Direction: LEFT (line to the left)")
+            else:
+                print(f"   • Direction: STRAIGHT (centered)")
+        else:
+            print(f"   • Status: {camera_conf}")
+        
+        # LiDAR Analysis
+        print(f"📡 LIDAR:")
+        if lidar_angle is not None:
+            clusters = self.find_line_clusters_in_lidar()
+            print(f"   • Angle: {lidar_angle:+6.2f}° ({lidar_conf})")
+            print(f"   • Clusters: {len(clusters)} found")
+            for i, cluster in enumerate(clusters):
+                print(f"     #{i+1}: {cluster['point_count']} pts @ {cluster['center_angle']:+5.1f}°, "
+                      f"dist={cluster['distance']:.2f}m")
+        else:
+            print(f"   • Status: {lidar_conf}")
+        
+        # Comparison
+        if camera_angle is not None and lidar_angle is not None:
+            angle_diff = abs(camera_angle - lidar_angle)
+            print(f"🔄 COMPARISON:")
+            print(f"   • Difference: {angle_diff:.2f}°")
+            
+            if angle_diff < 3:
+                agreement = "EXCELLENT"
+            elif angle_diff < 8:
+                agreement = "GOOD"
+            elif angle_diff < 15:
+                agreement = "FAIR"
+            else:
+                agreement = "POOR"
+            
+            print(f"   • Agreement: {agreement}")
+            
+            # Combined recommendation
+            if camera_conf == "HIGH" and lidar_conf == "HIGH":
+                combined_angle = (camera_angle + lidar_angle) / 2
+                print(f"   • Combined: {combined_angle:+6.2f}° (averaged)")
+            elif camera_conf == "HIGH":
+                print(f"   • Recommend: Use Camera ({camera_angle:+6.2f}°)")
+            elif lidar_conf == "HIGH":
+                print(f"   • Recommend: Use LiDAR ({lidar_angle:+6.2f}°)")
+            else:
+                combined_angle = (camera_angle + lidar_angle) / 2
+                print(f"   • Combined: {combined_angle:+6.2f}° (with caution)")
+        
+        print("="*60 + "\n")
     
     def correct_course(self, line_center_x):
         """
