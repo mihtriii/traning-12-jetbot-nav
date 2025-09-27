@@ -901,9 +901,9 @@ class JetBotController:
         # Di chuyển thẳng với speed thấp hơn base speed để an toàn
         forward_speed = self.BASE_SPEED * 0.7
         self.robot.set_motors(forward_speed, forward_speed)
-        
-        # Di chuyển trong 0.8 giây (có thể điều chỉnh)
-        time.sleep(1.2)
+
+        # Di chuyển trong 1.5 giây (có thể điều chỉnh)
+        time.sleep(1.5)
         
         # Dừng lại
         self.robot.stop()
