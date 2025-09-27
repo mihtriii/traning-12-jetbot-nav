@@ -853,10 +853,14 @@ class JetBotController:
                 if camera_conf in ["HIGH", "MEDIUM"]:
                     self.camera_intersection_detected = True
                     self.camera_detection_time = current_time
+                    
+                    # Di chuyển thêm một đoạn để đảm bảo LiDAR vào đúng vị trí
+                    rospy.loginfo("🚀 Moving forward to position LiDAR for better detection...")
+                    self.move_forward_briefly()
+                    
                     self.waiting_for_lidar_confirmation = True
                     rospy.loginfo("📷 CAMERA: Waiting for LiDAR confirmation...")
                     return False  # Chưa confirm, chỉ mới detect
-                time.sleep(0.5)  # Cho robot di chuyển thêm một chút để tránh nhiễu
         
         # Bước 2: Chờ LiDAR confirmation
         if self.waiting_for_lidar_confirmation:
@@ -887,6 +891,23 @@ class JetBotController:
         self.camera_intersection_detected = False
         self.camera_detection_time = 0
         self.waiting_for_lidar_confirmation = False
+    
+    def move_forward_briefly(self):
+        """
+        Di chuyển robot thẳng một đoạn ngắn để đảm bảo LiDAR vào đúng vị trí detection.
+        """
+        rospy.loginfo("🚀 Moving forward briefly for better LiDAR positioning...")
+        
+        # Di chuyển thẳng với speed thấp hơn base speed để an toàn
+        forward_speed = self.BASE_SPEED * 0.7
+        self.robot.set_motors(forward_speed, forward_speed)
+        
+        # Di chuyển trong 0.8 giây (có thể điều chỉnh)
+        time.sleep(0.8)
+        
+        # Dừng lại
+        self.robot.stop()
+        rospy.loginfo("✅ Forward movement completed, ready for LiDAR detection")
     
     def correct_course(self, line_center_x):
         """
