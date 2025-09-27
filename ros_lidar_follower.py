@@ -123,7 +123,27 @@ class JetBotController:
         state_text = f"State: {self.current_state.name if self.current_state else 'None'}"
         cv2.putText(debug_frame, state_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         
-        # 3. Vẽ line và trọng tâm (nếu robot đang bám line)
+        # 3. Vẽ thông tin FLAGS
+        y_offset = 40
+        
+        # Flag khởi động robot
+        start_color = (0, 255, 0) if self.robot_start_enabled else (0, 0, 255)  # Xanh lá/Đỏ
+        start_text = f"START: {'ON' if self.robot_start_enabled else 'OFF'}"
+        cv2.putText(debug_frame, start_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, start_color, 1, cv2.LINE_AA)
+        y_offset += 20
+        
+        # Flag LINE_VALIDATION
+        validation_color = (0, 255, 0) if self.line_validation_enabled else (0, 0, 255)  # Xanh lá/Đỏ  
+        validation_text = f"VALIDATION: {'ON' if self.line_validation_enabled else 'OFF'}"
+        cv2.putText(debug_frame, validation_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, validation_color, 1, cv2.LINE_AA)
+        y_offset += 20
+        
+        # Flag đã tìm thấy line lần đầu
+        initial_color = (0, 255, 0) if self.initial_line_found else (0, 0, 255)  # Xanh lá/Đỏ
+        initial_text = f"INIT_LINE: {'FOUND' if self.initial_line_found else 'NOT_FOUND'}"
+        cv2.putText(debug_frame, initial_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, initial_color, 1, cv2.LINE_AA)
+        
+        # 4. Vẽ line và trọng tâm (nếu robot đang bám line)
         if self.current_state == RobotState.DRIVING_STRAIGHT:
             # Lấy line center của ROI Chính
             line_center = self._get_line_center(image, self.ROI_Y, self.ROI_H)
@@ -185,6 +205,12 @@ class JetBotController:
         self.CROSS_MIN_ASPECT_RATIO = 1.5           # Reduced from 2.0 to 1.5 - catch thinner cross lines
         self.CROSS_MIN_WIDTH_RATIO = 0.3            # Reduced from 0.4 to 0.3 - catch shorter cross lines
         self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
+        
+        # FLAGS để kiểm soát khởi động và trạng thái robot
+        self.robot_start_enabled = False            # Flag để cho phép robot chạy (mặc định False)
+        self.line_validation_enabled = False        # Flag để cho phép LINE_VALIDATION (mặc định False) 
+        self.initial_line_found = False             # Flag để theo dõi đã tìm thấy line lần đầu chưa
+        self.startup_wait_timeout = 3000.0            # Timeout (giây) để chờ phét cờ khởi động
 
     def initialize_hardware(self):
         try:
@@ -203,6 +229,75 @@ class JetBotController:
         except Exception as e:
             rospy.logerr(f"Không thể tải mô hình YOLO từ '{self.YOLO_MODEL_PATH}'. Lỗi: {e}")
             self.yolo_session = None
+
+    def wait_for_start_permission(self):
+        """
+        Chờ người dùng phất cờ khởi động. Robot sẽ không chạy cho đến khi được phép.
+        """
+        rospy.loginfo("🏁 CHỜ LỆNH KHỞI ĐỘNG: Robot đang chờ phét cờ để bắt đầu...")
+        rospy.loginfo("🏁 Sử dụng: controller.set_robot_start_flag(True) để khởi động robot")
+        
+        start_wait_time = rospy.get_time()
+        rate = rospy.Rate(5)  # Check 5 lần per giây
+        
+        while not rospy.is_shutdown() and not self.robot_start_enabled:
+            elapsed = rospy.get_time() - start_wait_time
+            if elapsed > self.startup_wait_timeout:
+                rospy.logwarn("⏰ TIMEOUT: Đã chờ quá lâu để khởi động, robot vẫn không được phép chạy.")
+                return False
+            
+            rospy.loginfo_throttle(10, f"⏳ Vẫn đang chờ lệnh khởi động... ({elapsed:.1f}s/{self.startup_wait_timeout}s)")
+            rate.sleep()
+        
+        if self.robot_start_enabled:
+            rospy.loginfo("✅ ĐƯỢC PHÉP KHỞI ĐỘNG: Robot đã được phép chạy!")
+            return True
+        return False
+
+    def set_robot_start_flag(self, enabled=True):
+        """
+        Phét cờ để cho phép robot khởi động.
+        Args:
+            enabled (bool): True để cho phép khởi động, False để dừng
+        """
+        self.robot_start_enabled = enabled
+        if enabled:
+            rospy.loginfo("🚀 FLAG SET: Robot đã được phép khởi động!")
+        else:
+            rospy.loginfo("🛑 FLAG UNSET: Robot bị cấm khởi động!")
+
+    def set_line_validation_flag(self, enabled=True):
+        """
+        Phét cờ để cho phép LINE_VALIDATION.
+        Args:
+            enabled (bool): True để cho phép LINE_VALIDATION, False để cấm
+        """
+        self.line_validation_enabled = enabled
+        if enabled:
+            rospy.loginfo("📏 LINE_VALIDATION FLAG SET: Đã cho phép LINE_VALIDATION!")
+        else:
+            rospy.loginfo("🚫 LINE_VALIDATION FLAG UNSET: Cấm LINE_VALIDATION!")
+
+    def mark_initial_line_found(self):
+        """
+        Đánh dấu đã tìm thấy line lần đầu tiên.
+        Chỉ được gọi khi robot detect được line ổn định lần đầu.
+        """
+        if not self.initial_line_found:
+            self.initial_line_found = True
+            rospy.loginfo("🎯 INITIAL LINE FOUND: Đã tìm thấy line lần đầu tiên!")
+
+    def get_flags_status(self):
+        """
+        Lấy thông tin trạng thái của tất cả flags.
+        Returns:
+            dict: Trạng thái các flags
+        """
+        return {
+            'robot_start_enabled': self.robot_start_enabled,
+            'line_validation_enabled': self.line_validation_enabled,
+            'initial_line_found': self.initial_line_found
+        }
 
     def numpy_nms(self, boxes, scores, iou_threshold):
         """
@@ -348,7 +443,14 @@ class JetBotController:
         except Exception as e: rospy.logerr(f"Lỗi chuyển đổi ảnh: {e}")
 
     def run(self):
-        rospy.loginfo("Bắt đầu vòng lặp. Đợi 3 giây..."); time.sleep(3); rospy.loginfo("Hành trình bắt đầu!")
+        rospy.loginfo("Bắt đầu vòng lặp. Đợi 3 giây..."); time.sleep(3)
+        
+        # KIỂM TRA FLAG KHỞI ĐỘNG - Robot sẽ không chạy cho đến khi được phép
+        if not self.wait_for_start_permission():
+            rospy.logerr("❌ KHỞI ĐỘNG BỊ HỦY: Không nhận được lệnh khởi động trong thời gian cho phép!")
+            return  # Exit run method nếu không được phép khởi động
+        
+        rospy.loginfo("🎉 Hành trình bắt đầu!")
         self.detector.start_scanning()
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
@@ -397,12 +499,26 @@ class JetBotController:
                 execution_line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
 
                 if execution_line_center is not None:
+                    # Đánh dấu đã tìm thấy line lần đầu khi robot bắt đầu detect line
+                    if not self.initial_line_found:
+                        self.mark_initial_line_found()
+                    
                     # Kiểm tra xem line có nằm trong khoảng hợp lệ không trước khi bám
                     if not self._is_line_in_valid_range(self.latest_image):
-                        rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
-                        self.line_validation_attempts = 0  # Reset counter
-                        self._set_state(RobotState.LINE_VALIDATION)
-                        continue
+                        # CHỈ cho phép LINE_VALIDATION nếu các điều kiện được thỏa mãn
+                        if self.initial_line_found and self.line_validation_enabled:
+                            rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
+                            self.line_validation_attempts = 0  # Reset counter
+                            self._set_state(RobotState.LINE_VALIDATION)
+                            continue
+                        else:
+                            # Không được phép LINE_VALIDATION, tiếp tục bám line hiện tại
+                            reason = []
+                            if not self.initial_line_found:
+                                reason.append("chưa tìm được line lần đầu")
+                            if not self.line_validation_enabled:
+                                reason.append("LINE_VALIDATION bị cấm")
+                            rospy.logwarn(f"⚠️ Line không hợp lệ nhưng không thể LINE_VALIDATION do: {', '.join(reason)}")
                     
                     # An toàn để bám line, vì chúng ta biết phía trước không có giao lộ đột ngột.
                     self.correct_course(execution_line_center)
@@ -417,6 +533,18 @@ class JetBotController:
             # TRẠNG THÁI 1.5: KIỂM TRA VÀ XÁC THỰC VỊ TRÍ LINE (LINE_VALIDATION)
             # ===================================================================
             elif self.current_state == RobotState.LINE_VALIDATION:
+                # Kiểm tra flag LINE_VALIDATION có được bật không
+                if not self.line_validation_enabled:
+                    rospy.logwarn("⚠️ LINE_VALIDATION bị cấm bằng flag, chuyển về DRIVING_STRAIGHT")
+                    self._set_state(RobotState.DRIVING_STRAIGHT)
+                    continue
+                
+                # Kiểm tra đã tìm thấy line lần đầu chưa
+                if not self.initial_line_found:
+                    rospy.logwarn("⚠️ Chưa tìm thấy line lần đầu, không thể LINE_VALIDATION. Chuyển về DRIVING_STRAIGHT")
+                    self._set_state(RobotState.DRIVING_STRAIGHT)
+                    continue
+                
                 if self.latest_image is None:
                     rospy.logwarn("LINE_VALIDATION: Chờ dữ liệu camera...")
                     self.robot.stop()
