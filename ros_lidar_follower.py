@@ -474,7 +474,7 @@ class JetBotController:
                         rospy.loginfo("ĐÃ ĐẾN ĐÍCH CUỐI CÙNG!")
                         self._set_state(RobotState.GOAL_REACHED)
                     else:
-                        self._set_state(RobotState.HANzDLING_EVENT)
+                        self._set_state(RobotState.HANDLING_EVENT)
                         self.handle_intersection()
 
             # ===================================================================
