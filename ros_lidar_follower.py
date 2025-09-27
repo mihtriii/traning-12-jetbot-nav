@@ -139,9 +139,9 @@ class JetBotController:
         self.TURN_SPEED = 0.2
         self.TURN_DURATION_90_DEG = 0.8
         self.ROI_Y = int(self.HEIGHT * 0.85)
-        self.ROI_H = int(self.HEIGHT * 0.15)
+        self.ROI_H = int(self.HEIGHT * 0.2)
         self.ROI_CENTER_WIDTH_PERCENT = 0.5
-        self.LOOKAHEAD_ROI_Y = int(self.HEIGHT * 0.7) # Vị trí Y cao hơn
+        self.LOOKAHEAD_ROI_Y = int(self.HEIGHT * 0.75) # Vị trí Y cao hơn
         self.LOOKAHEAD_ROI_H = int(self.HEIGHT * 0.15) # Chiều cao tương tự
 
         self.CORRECTION_GAIN = 0.5
