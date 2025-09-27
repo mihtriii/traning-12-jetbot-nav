@@ -900,11 +900,11 @@ class JetBotController:
             confidence_level = "MEDIUM"
         
         # Additional confidence boost for very horizontal lines
-        if abs(best_candidate.get('line_angle', 0)) < 15:
-            if confidence_level == "MEDIUM":
-                confidence_level = "HIGH"
-            elif confidence_level == "LOW":
-                confidence_level = "MEDIUM"
+        # if abs(best_candidate.get('line_angle', 0)) < 15:
+        #     if confidence_level == "MEDIUM":
+        #         confidence_level = "HIGH"
+        #     elif confidence_level == "LOW":
+        #         confidence_level = "MEDIUM"
         
         cross_line_center = best_candidate['center_x']
         return True, confidence_level, cross_line_center
