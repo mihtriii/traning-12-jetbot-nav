@@ -1,339 +1,362 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+# opposite_detector_node.py
 
 import rospy
-import cv2
 import numpy as np
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String, Bool
+from std_srvs.srv import SetBool, SetBoolResponse
+import time
+import json
 import math
-from sensor_msgs.msg import LaserScan, Image
 
-class AngleChecker:
+class SimpleOppositeDetector:
     def __init__(self):
-        """
-        Khởi tạo AngleChecker để kiểm tra góc giữa robot và line.
-        """
-        rospy.loginfo("Khởi tạo AngleChecker...")
+        # Các tham số cố định
+        self.min_distance = 0.15
+        self.max_distance = 0.3
+        self.object_min_points = 10
+        self.distance_threshold = 0.1
+        self.angle_range = 10.0
+        self.detection_interval = 2.0
+        self.opposite_tolerance = 5.0
+        self.min_opposite_distance = 45.0
         
-        # Camera parameters
-        self.WIDTH, self.HEIGHT = 300, 300
-        self.ROI_Y = int(self.HEIGHT * 0.85)
-        self.ROI_H = int(self.HEIGHT * 0.15)
-        self.CAMERA_FOV = 60  # Field of view của camera (degrees)
-        
-        # Line detection parameters
-        self.LINE_COLOR_LOWER = np.array([0, 0, 0])
-        self.LINE_COLOR_UPPER = np.array([180, 255, 75])
-        self.SCAN_PIXEL_THRESHOLD = 100
-        
-        # LiDAR parameters
-        self.LIDAR_FRONT_ANGLE_RANGE = 30  # ±30 degrees từ phía trước
-        self.LIDAR_MIN_POINTS = 5  # Số điểm tối thiểu để phân tích
-        self.LIDAR_LINE_DISTANCE_THRESHOLD = 1.0  # Khoảng cách để phát hiện "rãnh" của line
-        
-        # Trọng số kết hợp
-        self.CAMERA_WEIGHT = 0.7
-        self.LIDAR_WEIGHT = 0.3
-        
-        # Data storage
+        # Biến điều khiển
+        self.scanning_active = False
+        self.subscriber = None
+        self.last_detection_time = 0
         self.latest_scan = None
-        self.latest_image = None
         
-        # ROS subscribers
-        rospy.Subscriber('/scan', LaserScan, self.scan_callback)
-        rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
+        # Publisher để gửi tín hiệu giao lộ
+#         self.notification_pub = rospy.Publisher('/intersection_trigger', String, queue_size=10)
+#         self.status_pub = rospy.Publisher('/scan_status', Bool, queue_size=1)
         
-        rospy.loginfo("AngleChecker đã sẵn sàng!")
+        # Service để bật/tắt quét
+#         self.start_service = rospy.Service('/start_scanning', SetBool, self.start_scanning_service)
+#         self.stop_service = rospy.Service('/stop_scanning', SetBool, self.stop_scanning_service)
+        
+#         rospy.loginfo("Opposite Detector initialized.")
     
-    def scan_callback(self, scan_msg):
-        """Callback để nhận dữ liệu LiDAR."""
-        self.latest_scan = scan_msg
+#     def start_scanning_service(self, req):
+#         if req.data: return self.start_scanning()
+#         else: return self.stop_scanning()
     
-    def camera_callback(self, image_msg):
-        """Callback để nhận dữ liệu camera."""
+#     def stop_scanning_service(self, req):
+#         if req.data: return self.stop_scanning()
+#         else: return self.start_scanning()
+    
+    def start_scanning(self):
         try:
-            if image_msg.encoding.endswith('compressed'):
-                np_arr = np.frombuffer(image_msg.data, np.uint8)
-                cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            else:
-                cv_image = np.frombuffer(image_msg.data, dtype=np.uint8).reshape(
-                    image_msg.height, image_msg.width, -1)
-            
-            if 'rgb' in image_msg.encoding:
-                cv_image = cv2.cvtColor(cv_image, cv2.COLOR_RGB2BGR)
-            
-            self.latest_image = cv2.resize(cv_image, (self.WIDTH, self.HEIGHT))
+            if not self.scanning_active:
+                self.subscriber = rospy.Subscriber('/scan', LaserScan, self.callback)
+                self.scanning_active = True
+#                 self.status_pub.publish(True)
+#                 rospy.loginfo("Scanning STARTED")
+                return SetBoolResponse(success=True, message="Scanning started")
+            return SetBoolResponse(success=True, message="Already active")
         except Exception as e:
-            rospy.logerr(f"Lỗi xử lý ảnh: {e}")
+            rospy.logerr(f"Failed to start scanning: {e}")
+            return SetBoolResponse(success=False, message=f"Failed to start: {e}")
     
-    def get_line_center_from_camera(self):
-        """
-        Tìm trọng tâm của line từ camera.
-        Returns: vị trí x của line center, None nếu không tìm thấy
-        """
-        if self.latest_image is None:
-            return None
-        
-        # Lấy ROI
-        roi = self.latest_image[self.ROI_Y : self.ROI_Y + self.ROI_H, :]
-        
-        # Chuyển sang HSV và tạo mask
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
-        
-        # Tìm contours
-        _, contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return None
-        
-        # Lấy contour lớn nhất
-        largest_contour = max(contours, key=cv2.contourArea)
-        
-        if cv2.contourArea(largest_contour) < self.SCAN_PIXEL_THRESHOLD:
-            return None
-        
-        # Tính trọng tâm
-        M = cv2.moments(largest_contour)
-        if M["m00"] > 0:
-            return int(M["m10"] / M["m00"])
-        
-        return None
-    
-    def get_line_angle_from_camera(self):
-        """
-        Tính góc của line dựa trên vị trí trọng tâm từ camera.
-        Returns: góc lệch (degrees), None nếu không xác định được
-        """
-        line_center = self.get_line_center_from_camera()
-        if line_center is None:
-            return None
-        
-        # Chuyển đổi vị trí pixel thành góc
-        image_center = self.WIDTH / 2
-        pixel_offset = line_center - image_center
-        
-        # Tính góc dựa trên FOV camera
-        angle = (pixel_offset / image_center) * (self.CAMERA_FOV / 2)
-        
-        return angle
-    
-    def analyze_lidar_pattern(self):
-        """
-        Phân tích pattern từ dữ liệu LiDAR để tìm góc của line.
-        Returns: góc lệch (degrees), None nếu không xác định được
-        """
-        if self.latest_scan is None:
-            return None
-        
-        scan_data = self.latest_scan
-        front_angles = []
-        front_distances = []
-        
-        # Lọc các điểm LiDAR ở phía trước
-        for i, distance in enumerate(scan_data.ranges):
-            angle = scan_data.angle_min + i * scan_data.angle_increment
-            angle_deg = math.degrees(angle)
-            
-            # Chỉ xét các điểm ở phía trước trong phạm vi cho phép
-            if (-self.LIDAR_FRONT_ANGLE_RANGE <= angle_deg <= self.LIDAR_FRONT_ANGLE_RANGE and 
-                scan_data.range_min < distance < scan_data.range_max):
-                front_angles.append(angle_deg)
-                front_distances.append(distance)
-        
-        if len(front_distances) < self.LIDAR_MIN_POINTS:
-            rospy.logdebug("Không đủ điểm LiDAR để phân tích")
-            return None
-        
-        # Tìm pattern của line (các điểm tạo ra "rãnh" trong dữ liệu)
-        line_angles = []
-        
-        for i, distance in enumerate(front_distances):
-            # Line thường tạo ra khoảng trống hoặc khoảng cách xa hơn
-            if distance > self.LIDAR_LINE_DISTANCE_THRESHOLD:
-                line_angles.append(front_angles[i])
-        
-        if len(line_angles) < 3:
-            rospy.logdebug("Không tìm thấy đủ pattern của line trong LiDAR")
-            return None
-        
-        # Tính góc trung bình của các điểm line
-        avg_line_angle = np.mean(line_angles)
-        
-        # Lọc nhiễu bằng cách loại bỏ các điểm quá xa khỏi trung bình
-        filtered_angles = [angle for angle in line_angles 
-                          if abs(angle - avg_line_angle) < 10]  # ±10 degrees tolerance
-        
-        if len(filtered_angles) < 2:
-            return avg_line_angle
-        
-        return np.mean(filtered_angles)
-    
-    def get_combined_line_angle(self):
-        """
-        Kết hợp thông tin từ camera và LiDAR để xác định góc chính xác nhất.
-        Returns: góc kết hợp (degrees), None nếu không có thông tin
-        """
-        camera_angle = self.get_line_angle_from_camera()
-        lidar_angle = self.analyze_lidar_pattern()
-        
-        rospy.loginfo(f"Camera angle: {camera_angle}, LiDAR angle: {lidar_angle}")
-        
-        # Kết hợp hai nguồn thông tin
-        if camera_angle is not None and lidar_angle is not None:
-            combined_angle = (self.CAMERA_WEIGHT * camera_angle + 
-                            self.LIDAR_WEIGHT * lidar_angle)
-            confidence = "HIGH"
-        elif camera_angle is not None:
-            combined_angle = camera_angle
-            confidence = "MEDIUM"
-        elif lidar_angle is not None:
-            combined_angle = lidar_angle
-            confidence = "LOW"
-        else:
-            return None, "NO_DATA"
-        
-        return combined_angle, confidence
-    
-    def is_line_trajectory_valid(self, max_allowed_angle=15):
-        """
-        Kiểm tra xem robot có đang đi đúng hướng line không.
-        
-        Args:
-            max_allowed_angle: Góc tối đa cho phép (degrees)
-            
-        Returns:
-            tuple: (is_valid, angle, confidence)
-        """
-        angle, confidence = self.get_combined_line_angle()
-        
-        if angle is None:
-            return True, None, confidence  # Không đủ dữ liệu để phán đoán
-        
-        is_valid = abs(angle) <= max_allowed_angle
-        
-        if not is_valid:
-            rospy.logwarn(f"Line angle quá lớn: {angle:.2f}°. Robot có thể đang đi sai hướng.")
-        
-        return is_valid, angle, confidence
-    
-    def get_correction_suggestion(self):
-        """
-        Đưa ra gợi ý điều chỉnh dựa trên góc line.
-        
-        Returns:
-            dict: {'action': str, 'angle': float, 'confidence': str, 'description': str}
-        """
-        angle, confidence = self.get_combined_line_angle()
-        
-        if angle is None:
-            return {
-                'action': 'continue',
-                'angle': 0,
-                'confidence': confidence,
-                'description': 'Không có dữ liệu góc, tiếp tục theo hướng hiện tại'
-            }
-        
-        # Xác định hành động cần thiết
-        if abs(angle) < 3:
-            action = 'continue'
-            description = 'Góc line tốt, tiếp tục đi thẳng'
-        elif 3 <= abs(angle) < 10:
-            action = 'slight_correction'
-            description = f'Điều chỉnh nhẹ {"trái" if angle > 0 else "phải"}'
-        elif 10 <= abs(angle) < 20:
-            action = 'moderate_correction'
-            description = f'Điều chỉnh vừa phải {"trái" if angle > 0 else "phải"}'
-        else:
-            action = 'strong_correction'
-            description = f'Cần điều chỉnh mạnh {"trái" if angle > 0 else "phải"}'
-        
-        return {
-            'action': action,
-            'angle': angle,
-            'confidence': confidence,
-            'description': description
-        }
-    
-    def visualize_angle_info(self):
-        """
-        Tạo ảnh visualization hiển thị thông tin góc.
-        Returns: ảnh với thông tin góc được vẽ lên
-        """
-        if self.latest_image is None:
-            return None
-        
-        vis_image = self.latest_image.copy()
-        
-        # Vẽ ROI
-        cv2.rectangle(vis_image, (0, self.ROI_Y), 
-                     (self.WIDTH-1, self.ROI_Y + self.ROI_H), (0, 255, 0), 2)
-        
-        # Vẽ line center nếu tìm thấy
-        line_center = self.get_line_center_from_camera()
-        if line_center is not None:
-            cv2.line(vis_image, (line_center, self.ROI_Y), 
-                    (line_center, self.ROI_Y + self.ROI_H), (0, 0, 255), 3)
-        
-        # Vẽ center line của image
-        image_center = self.WIDTH // 2
-        cv2.line(vis_image, (image_center, 0), 
-                (image_center, self.HEIGHT), (255, 255, 0), 1)
-        
-        # Lấy thông tin góc
-        angle, confidence = self.get_combined_line_angle()
-        suggestion = self.get_correction_suggestion()
-        
-        # Vẽ text thông tin
-        y_offset = 20
-        if angle is not None:
-            cv2.putText(vis_image, f"Angle: {angle:.1f}deg", 
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            y_offset += 25
-        
-        cv2.putText(vis_image, f"Confidence: {confidence}", 
-                   (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        y_offset += 25
-        
-        cv2.putText(vis_image, f"Action: {suggestion['action']}", 
-                   (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        
-        return vis_image
+    def stop_scanning(self):
+        try:
+            if self.scanning_active:
+                if self.subscriber:
+                    self.subscriber.unregister()
+                    self.subscriber = None
+                self.scanning_active = False
+                self.latest_scan = None
+#                 self.status_pub.publish(False)
+                rospy.loginfo("Scanning STOPPED")
+                return SetBoolResponse(success=True, message="Scanning stopped")
+            return SetBoolResponse(success=True, message="Already inactive")
+        except Exception as e:
+            rospy.logerr(f"Failed to stop scanning: {e}")
+            return SetBoolResponse(success=False, message=f"Failed to stop: {e}")
 
-def main():
-    """Test function để chạy AngleChecker độc lập."""
-    rospy.init_node('angle_checker_node', anonymous=True)
+    def callback(self, scan):
+        if not self.scanning_active: return
+        self.latest_scan = scan
+        current_time = time.time()
+        if current_time - self.last_detection_time >= self.detection_interval:
+            # self.process_detection()
+            self.last_detection_time = current_time
+    
+    def print_all_lidar_data(self, scan):
+        """In tất cả thông số LiDAR đo được"""
+        print("\n" + "="*80)
+        print("🔍 LIDAR SCAN DATA - COMPLETE ANALYSIS")
+        print("="*80)
+        
+        # 1. Thông tin cơ bản về scan
+        print(f"📊 SCAN BASIC INFO:")
+        print(f"   • Timestamp: {scan.header.stamp}")
+        print(f"   • Frame ID: {scan.header.frame_id}")
+        print(f"   • Total ranges: {len(scan.ranges)}")
+        print(f"   • Angle min: {math.degrees(scan.angle_min):.1f}°")
+        print(f"   • Angle max: {math.degrees(scan.angle_max):.1f}°")
+        print(f"   • Angle increment: {math.degrees(scan.angle_increment):.3f}°")
+        print(f"   • Range min: {scan.range_min:.3f}m")
+        print(f"   • Range max: {scan.range_max:.3f}m")
+        print(f"   • Scan duration: {scan.scan_time:.3f}s")
+        print(f"   • Time increment: {scan.time_increment:.6f}s")
+        
+        # 2. Phân tích dữ liệu ranges
+        ranges = np.array(scan.ranges)
+        valid_ranges = ranges[(ranges >= scan.range_min) & (ranges <= scan.range_max) & np.isfinite(ranges)]
+        
+        print(f"\n📏 RANGE STATISTICS:")
+        print(f"   • Valid points: {len(valid_ranges)}/{len(ranges)} ({len(valid_ranges)/len(ranges)*100:.1f}%)")
+        print(f"   • Invalid/Inf points: {len(ranges) - len(valid_ranges)}")
+        
+        if len(valid_ranges) > 0:
+            print(f"   • Min distance: {np.min(valid_ranges):.3f}m")
+            print(f"   • Max distance: {np.max(valid_ranges):.3f}m")
+            print(f"   • Mean distance: {np.mean(valid_ranges):.3f}m")
+            print(f"   • Median distance: {np.median(valid_ranges):.3f}m")
+            print(f"   • Std deviation: {np.std(valid_ranges):.3f}m")
+        
+        # 3. Phân tích theo góc (8 hướng chính)
+        print(f"\n🧭 DIRECTIONAL ANALYSIS:")
+        directions = {
+            'North (0°)': (-15, 15),
+            'NE (45°)': (30, 60),
+            'East (90°)': (75, 105),
+            'SE (135°)': (120, 150),
+            'South (180°)': (165, 195),
+            'SW (225°)': (210, 240),
+            'West (270°)': (255, 285),
+            'NW (315°)': (300, 330)
+        }
+        
+        for direction, (start_angle, end_angle) in directions.items():
+            direction_ranges = []
+            for i, distance in enumerate(ranges):
+                angle_deg = math.degrees(scan.angle_min + i * scan.angle_increment)
+                # Normalize angle to 0-360
+                if angle_deg < 0:
+                    angle_deg += 360
+                
+                if start_angle <= angle_deg <= end_angle and scan.range_min < distance < scan.range_max:
+                    direction_ranges.append(distance)
+            
+            if direction_ranges:
+                print(f"   • {direction}: {len(direction_ranges)} points, "
+                      f"avg: {np.mean(direction_ranges):.3f}m, "
+                      f"min: {np.min(direction_ranges):.3f}m")
+            else:
+                print(f"   • {direction}: No valid points")
+        
+        # 4. Phát hiện objects trong filter range
+        print(f"\n🎯 OBJECTS IN DETECTION RANGE ({self.min_distance}m - {self.max_distance}m):")
+        objects_in_range = []
+        
+        for i, distance in enumerate(ranges):
+            if self.min_distance <= distance <= self.max_distance:
+                angle_deg = math.degrees(scan.angle_min + i * scan.angle_increment)
+                objects_in_range.append({
+                    'index': i,
+                    'angle': angle_deg,
+                    'distance': distance
+                })
+        
+        print(f"   • Total points in range: {len(objects_in_range)}")
+        
+        if objects_in_range:
+            # Group by proximity
+            clusters = []
+            current_cluster = [objects_in_range[0]]
+            
+            for i in range(1, len(objects_in_range)):
+                prev_point = objects_in_range[i-1]
+                curr_point = objects_in_range[i]
+                
+                # Check if points are continuous (angle and distance)
+                angle_diff = abs(curr_point['angle'] - prev_point['angle'])
+                dist_diff = abs(curr_point['distance'] - prev_point['distance'])
+                
+                if angle_diff < 5.0 and dist_diff < self.distance_threshold:
+                    current_cluster.append(curr_point)
+                else:
+                    if len(current_cluster) >= 3:  # Minimum points for object
+                        clusters.append(current_cluster)
+                    current_cluster = [curr_point]
+            
+            if len(current_cluster) >= 3:
+                clusters.append(current_cluster)
+            
+            print(f"   • Detected clusters: {len(clusters)}")
+            
+            for j, cluster in enumerate(clusters):
+                angles = [p['angle'] for p in cluster]
+                distances = [p['distance'] for p in cluster]
+                center_angle = np.mean(angles)
+                avg_distance = np.mean(distances)
+                
+                print(f"     Cluster {j+1}: {len(cluster)} points, "
+                      f"center: {center_angle:.1f}°, "
+                      f"avg dist: {avg_distance:.3f}m, "
+                      f"span: {np.min(angles):.1f}° to {np.max(angles):.1f}°")
+        
+        # 5. Closest and farthest valid points
+        print(f"\n🔍 EXTREME POINTS:")
+        if len(valid_ranges) > 0:
+            min_idx = np.argmin(ranges[np.isfinite(ranges) & (ranges >= scan.range_min) & (ranges <= scan.range_max)])
+            max_idx = np.argmax(ranges[np.isfinite(ranges) & (ranges >= scan.range_min) & (ranges <= scan.range_max)])
+            
+            min_angle = math.degrees(scan.angle_min + min_idx * scan.angle_increment)
+            max_angle = math.degrees(scan.angle_min + max_idx * scan.angle_increment)
+            
+            print(f"   • Closest point: {np.min(valid_ranges):.3f}m at {min_angle:.1f}°")
+            print(f"   • Farthest point: {np.max(valid_ranges):.3f}m at {max_angle:.1f}°")
+        
+        # 6. Points in front (important for navigation)
+        print(f"\n⬆️  FRONT SECTOR ANALYSIS (-45° to +45°):")
+        front_ranges = []
+        front_angles = []
+        
+        for i, distance in enumerate(ranges):
+            angle_deg = math.degrees(scan.angle_min + i * scan.angle_increment)
+            if -45 <= angle_deg <= 45 and scan.range_min < distance < scan.range_max:
+                front_ranges.append(distance)
+                front_angles.append(angle_deg)
+        
+        if front_ranges:
+            print(f"   • Valid front points: {len(front_ranges)}")
+            print(f"   • Min front distance: {np.min(front_ranges):.3f}m")
+            print(f"   • Avg front distance: {np.mean(front_ranges):.3f}m")
+            
+            # Find gaps in front (potential paths)
+            far_points = [(angle, dist) for angle, dist in zip(front_angles, front_ranges) if dist > 1.0]
+            if far_points:
+                print(f"   • Open paths (>1.0m): {len(far_points)} points")
+                for angle, dist in far_points[:5]:  # Show first 5
+                    print(f"     - {angle:.1f}°: {dist:.3f}m")
+        else:
+            print(f"   • No valid points in front sector")
+        
+        print("="*80)
+        print("🔍 END OF LIDAR ANALYSIS")
+        print("="*80 + "\n")
+    
+    def index_to_angle(self, index, scan):
+        angle_rad = scan.angle_min + (index * scan.angle_increment)
+        return math.degrees(angle_rad)
+    
+    def get_angle_difference(self, angle1, angle2):
+        diff = abs(angle1 - angle2)
+        return 360 - diff if diff > 180 else diff
+    
+    def are_opposite(self, angle1, angle2):
+        return abs(self.get_angle_difference(angle1, angle2) - 180.0) <= self.opposite_tolerance
+    
+    def find_all_objects(self, scan):
+        # (logic phát hiện vật thể)
+        ranges = np.array(scan.ranges)
+        n = len(ranges)
+        angle_increment_deg = math.degrees(scan.angle_increment)
+        points_per_range = int(self.angle_range / angle_increment_deg)
+        objects = []
+        for start_idx in range(0, n, points_per_range // 2):
+            end_idx = min(start_idx + points_per_range, n)
+            if end_idx - start_idx < points_per_range // 2: continue
+            zone_ranges = ranges[start_idx:end_idx]
+            center_idx = start_idx + (end_idx - start_idx) // 2
+            center_angle = self.index_to_angle(center_idx, scan)
+            obj = self.detect_object_in_zone(zone_ranges, f"Zone_{start_idx}")
+            if obj:
+                obj['center_angle'] = center_angle
+                obj['center_index'] = center_idx
+                objects.append(obj)
+        return objects
+
+    def find_opposite_pairs(self, objects):
+        opposite_pairs = []
+        for i, obj1 in enumerate(objects):
+            for j, obj2 in enumerate(objects[i+1:], i+1):
+                angle_diff = self.get_angle_difference(obj1['center_angle'], obj2['center_angle'])
+                if angle_diff >= self.min_opposite_distance and self.are_opposite(obj1['center_angle'], obj2['center_angle']):
+                    opposite_pairs.append({'object1': obj1, 'object2': obj2, 'angle_difference': angle_diff})
+        return opposite_pairs
+    
+    def process_detection(self):
+        if self.latest_scan is None: return
+        scan = self.latest_scan
+        timestamp = rospy.get_time()
+        all_objects = self.find_all_objects(scan)
+        if len(all_objects) < 2: return
+        
+        opposite_pairs = self.find_opposite_pairs(all_objects)
+        
+        if opposite_pairs:
+            opposite_pairs.sort(key=lambda x: abs(x['angle_difference'] - 180.0))
+            best_pair = opposite_pairs[0]
+            
+            # 🔥 IN TẤT CẢ THÔNG SỐ LIDAR KHI PHÁT HIỆN OPPOSITE
+            print(f"\n🚨 OPPOSITE OBJECTS DETECTED at {timestamp:.1f}s! 🚨")
+            self.print_all_lidar_data(scan)
+            
+            # rospy.loginfo("[%.1f] *** OPPOSITE OBJECTS DETECTED ***", timestamp)
+            # Tạo và gửi tin nhắn
+            notification = {
+                "timestamp": timestamp,
+                "detection_type": 'OPPOSITE_OBJECTS',
+                # ... thông tin chi tiết khác
+            }
+#             self.notification_pub.publish(json.dumps(notification))
+            return True
+        else:
+            # rospy.loginfo("[%.1f] Found %d objects, but none are opposite", timestamp, len(all_objects))
+            return False
+
+    def detect_object_in_zone(self, zone_ranges, zone_name):
+        if len(zone_ranges) == 0: return None
+        valid_mask = (zone_ranges >= self.min_distance) & (zone_ranges <= self.max_distance) & np.isfinite(zone_ranges)
+        if np.sum(valid_mask) < self.object_min_points: return None
+        valid_ranges = zone_ranges[valid_mask]
+        valid_indices = np.where(valid_mask)[0]
+        clusters, current_cluster = [], [0]
+        for i in range(1, len(valid_ranges)):
+            if (valid_indices[i] - valid_indices[current_cluster[-1]] <= 2 and abs(valid_ranges[i] - valid_ranges[current_cluster[-1]]) <= self.distance_threshold):
+                current_cluster.append(i)
+            else:
+                if len(current_cluster) >= self.object_min_points: clusters.append(current_cluster)
+                current_cluster = [i]
+        if len(current_cluster) >= self.object_min_points: clusters.append(current_cluster)
+        if not clusters: return None
+        largest_cluster = max(clusters, key=len)
+        cluster_distances = [valid_ranges[i] for i in largest_cluster]
+        return {'distance': np.mean(cluster_distances), 'point_count': len(largest_cluster), 'zone': zone_name}
+
+# Test function để chạy và in lidar data
+def test_lidar_data_printing():
+    """Function để test việc in dữ liệu LiDAR"""
+    rospy.init_node('lidar_data_printer', anonymous=True)
+    
+    detector = SimpleOppositeDetector()
+    detector.start_scanning()
+    
+    print("🔍 Bắt đầu monitoring LiDAR data. Nhấn Ctrl+C để dừng.")
+    print("📊 Sẽ in chi tiết khi phát hiện opposite objects...")
+    
+    rate = rospy.Rate(1)  # 1 Hz để không spam quá nhiều
     
     try:
-        checker = AngleChecker()
-        rate = rospy.Rate(10)  # 10 Hz
-        
-        rospy.loginfo("Bắt đầu kiểm tra góc. Nhấn Ctrl+C để dừng.")
-        
         while not rospy.is_shutdown():
-            # Kiểm tra tính hợp lệ của trajectory
-            is_valid, angle, confidence = checker.is_line_trajectory_valid()
-            
-            # Lấy gợi ý điều chỉnh
-            suggestion = checker.get_correction_suggestion()
-            
-            # In thông tin ra console
-            rospy.loginfo_throttle(1, 
-                f"Valid: {is_valid}, Angle: {angle:.1f if angle else 'N/A'}°, "
-                f"Confidence: {confidence}, Action: {suggestion['action']}")
-            
-            # Hiển thị visualization (tùy chọn)
-            vis_image = checker.visualize_angle_info()
-            if vis_image is not None:
-                cv2.imshow("Angle Checker", vis_image)
-                cv2.waitKey(1)
-            
+            if detector.latest_scan is not None:
+                # Có thể uncomment dòng dưới để in mọi scan (cẩn thận - rất nhiều dữ liệu!)
+                # detector.print_all_lidar_data(detector.latest_scan)
+                
+                # Hoặc chỉ process detection (sẽ in khi có opposite)
+                detector.process_detection()
+                
             rate.sleep()
-    
+            
     except rospy.ROSInterruptException:
-        rospy.loginfo("AngleChecker node đã bị ngắt.")
-    except Exception as e:
-        rospy.logerr(f"Lỗi trong AngleChecker: {e}")
+        print("🛑 Dừng monitoring LiDAR data.")
     finally:
-        cv2.destroyAllWindows()
+        detector.stop_scanning()
 
-if __name__ == '__main__':
-    main()
+# if __name__ == '__main__':
+#     test_lidar_data_printing()
