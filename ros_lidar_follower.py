@@ -123,19 +123,6 @@ class JetBotController:
         state_text = f"State: {self.current_state.name if self.current_state else 'None'}"
         cv2.putText(debug_frame, state_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         
-        # 2.5. Vẽ trạng thái FLAGS
-        y_offset = 40
-        if self.ROBOT_START_FLAG_ENABLED:
-            start_flag_text = f"Start Flag: {'ON' if self.robot_start_flag else 'OFF'}"
-            start_flag_color = (0, 255, 0) if self.robot_start_flag else (0, 0, 255)  # Green if ON, Red if OFF
-            cv2.putText(debug_frame, start_flag_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, start_flag_color, 1, cv2.LINE_AA)
-            y_offset += 20
-            
-        if self.LINE_VALIDATION_FLAG_ENABLED:
-            validation_flag_text = f"Validation Flag: {'ON' if self.line_validation_flag else 'OFF'}"
-            validation_flag_color = (0, 255, 0) if self.line_validation_flag else (0, 0, 255)
-            cv2.putText(debug_frame, validation_flag_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, validation_flag_color, 1, cv2.LINE_AA)
-        
         # 3. Vẽ line và trọng tâm (nếu robot đang bám line)
         if self.current_state == RobotState.DRIVING_STRAIGHT:
             # Lấy line center của ROI Chính
@@ -145,66 +132,6 @@ class JetBotController:
                 cv2.line(debug_frame, (line_center, self.ROI_Y), (line_center, self.ROI_Y + self.ROI_H), (0, 0, 255), 2)
 
         return debug_frame
-
-    def set_robot_start_flag(self, enable_flag=True):
-        """
-        🚩 Set flag cho phép robot bắt đầu hoạt động
-        Args:
-            enable_flag (bool): True để cho phép robot hoạt động
-        """
-        self.robot_start_flag = enable_flag
-        status = "CHO PHÉP HOẠT ĐỘNG" if enable_flag else "TẠM DỪNG"
-        rospy.loginfo(f"🚩 ROBOT START FLAG: {status}")
-        
-    def set_line_validation_flag(self, enable_flag=True):
-        """
-        🚩 Set flag cho phép chuyển sang LINE_VALIDATION state
-        Args:
-            enable_flag (bool): True để cho phép LINE_VALIDATION
-        """
-        self.line_validation_flag = enable_flag
-        status = "CHO PHÉP LINE_VALIDATION" if enable_flag else "KHÔNG CHO PHÉP LINE_VALIDATION"
-        rospy.loginfo(f"🚩 LINE_VALIDATION FLAG: {status}")
-        
-    def reset_all_flags(self):
-        """🔄 Reset tất cả flags về False"""
-        self.robot_start_flag = False
-        self.line_validation_flag = False
-        rospy.loginfo("🔄 ĐÃ RESET TẤT CẢ FLAGS")
-        
-    def wait_for_start_permission(self):
-        """
-        🕐 Chờ cho đến khi có flag cho phép khởi động
-        Returns: True nếu được cho phép, False nếu timeout
-        """
-        if not self.ROBOT_START_FLAG_ENABLED:
-            rospy.loginfo("🔓 Robot start flag DISABLED - Khởi động ngay lập tức")
-            return True
-            
-        rospy.loginfo("🚩 ĐANG CHỜ LỆNH KHỞI ĐỘNG...")
-        rospy.loginfo("📋 Để bắt đầu, hãy gọi: controller.set_robot_start_flag(True)")
-        
-        start_time = rospy.get_time()
-        rate = rospy.Rate(1.0 / self.FLAG_CHECK_INTERVAL)  # Check every FLAG_CHECK_INTERVAL seconds
-        
-        while not rospy.is_shutdown():
-            if self.robot_start_flag:
-                rospy.loginfo("✅ ĐÃ NHẬN ĐƯỢC LỆNH KHỞI ĐỘNG! Bắt đầu hoạt động...")
-                return True
-                
-            # Kiểm tra timeout
-            elapsed = rospy.get_time() - start_time
-            if elapsed > self.STARTUP_WAIT_TIMEOUT:
-                rospy.logwarn(f"⏰ TIMEOUT! Không nhận được lệnh khởi động sau {self.STARTUP_WAIT_TIMEOUT}s")
-                return False
-                
-            # Hiển thị trạng thái chờ
-            remaining = self.STARTUP_WAIT_TIMEOUT - elapsed
-            rospy.loginfo_throttle(5, f"⏳ Đang chờ lệnh khởi động... (còn {remaining:.0f}s)")
-            
-            rate.sleep()
-        
-        return False
 
     def setup_parameters(self):
         self.WIDTH, self.HEIGHT = 300, 300
@@ -225,6 +152,7 @@ class JetBotController:
         self.INTERSECTION_APPROACH_DURATION = 0.5
         self.LINE_REACQUIRE_TIMEOUT = 3.0
         self.SCAN_PIXEL_THRESHOLD = 100
+        self.initialize_motion_flags = True
         self.YOLO_MODEL_PATH = "models/best.onnx"
         self.YOLO_CONF_THRESHOLD = 0.6
         self.YOLO_INPUT_SIZE = (640, 640)
@@ -251,13 +179,6 @@ class JetBotController:
         self.LINE_CENTER_TOLERANCE = 0.2    # Tỷ lệ cho phép line lệch khỏi center (20% width)
         self.LINE_VALIDATION_ATTEMPTS = 8   # Số lần thử validate tối đa
         
-        # Parameters cho Line Quality Detection
-        self.LINE_MIN_AREA_THRESHOLD = self.SCAN_PIXEL_THRESHOLD  # Diện tích tối thiểu của line contour
-        self.LINE_MIN_COVERAGE_RATIO = 0.05     # Tỷ lệ tối thiểu ROI được phủ bởi line (5%)
-        self.LINE_MIN_ASPECT_RATIO = 1.5        # Aspect ratio tối thiểu (tính horizontal)
-        self.LINE_MAX_CONTOUR_COUNT = 3         # Số lượng contour tối đa (tránh fragmentation)
-        self.LINE_QUALITY_CHECK_ENABLED = True # Bật/tắt kiểm tra chất lượng line
-        
         # Parameters cho Camera-LiDAR Intersection Detection
         self.CAMERA_LIDAR_INTERSECTION_MODE = True  # Enable camera-first detection
         self.CROSS_DETECTION_ROI_Y_PERCENT = 0.45   # Extended from 0.50 to 0.45 - detect earlier
@@ -265,16 +186,6 @@ class JetBotController:
         self.CROSS_MIN_ASPECT_RATIO = 1.5           # Reduced from 2.0 to 1.5 - catch thinner cross lines
         self.CROSS_MIN_WIDTH_RATIO = 0.3            # Reduced from 0.4 to 0.3 - catch shorter cross lines
         self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
-        
-        # 🚩 FLAGS KIỂM SOÁT HOẠT ĐỘNG ROBOT
-        self.ROBOT_START_FLAG_ENABLED = True       # Bật/tắt hệ thống flag khởi động
-        self.robot_start_flag = False              # Flag cho phép robot bắt đầu hoạt động
-        self.LINE_VALIDATION_FLAG_ENABLED = True   # Bật/tắt flag kiểm soát LINE_VALIDATION
-        self.line_validation_flag = False          # Flag cho phép chuyển sang LINE_VALIDATION
-        
-        # Thời gian chờ và cảnh báo
-        self.STARTUP_WAIT_TIMEOUT = 30.0           # Timeout chờ start flag (30 giây)
-        self.FLAG_CHECK_INTERVAL = 1.0             # Kiểm tra flag mỗi 1 giây
 
     def initialize_hardware(self):
         try:
@@ -438,25 +349,10 @@ class JetBotController:
         except Exception as e: rospy.logerr(f"Lỗi chuyển đổi ảnh: {e}")
 
     def run(self):
-        rospy.loginfo("Bắt đầu vòng lặp. Đợi 3 giây..."); time.sleep(3)
-        
-        # 🚩 KIỂM TRA FLAG KHỞI ĐỘNG TRƯỚC KHI BẮT ĐẦU
-        if not self.wait_for_start_permission():
-            rospy.logerr("❌ KHÔNG NHẬN ĐƯỢC LỆNH KHỞI ĐỘNG - DỪNG CHƯƠNG TRÌNH")
-            return
-            
-        rospy.loginfo("🚀 HÀNH TRÌNH BẮT ĐẦU!")
-        
+        rospy.loginfo("Bắt đầu vòng lặp. Đợi 3 giây..."); time.sleep(3); rospy.loginfo("Hành trình bắt đầu!")
         self.detector.start_scanning()
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
-            # 🚩 KIỂM TRA START FLAG LIÊN TỤC (có thể bị tắt trong quá trình chạy)
-            if self.ROBOT_START_FLAG_ENABLED and not self.robot_start_flag:
-                rospy.logwarn_throttle(2, "⚠️ Robot bị tạm dừng - Start flag OFF")
-                self.robot.stop()
-                rate.sleep()
-                continue
-                
             # ===================================================================
             # TRẠNG THÁI 1: ĐANG BÁM LINE (DRIVING_STRAIGHT)
             # ===================================================================
@@ -502,30 +398,20 @@ class JetBotController:
                 execution_line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
 
                 if execution_line_center is not None:
-                    # Kiểm tra chất lượng line trước khi quyết định bám hoặc validate
-                    line_info = self._is_line_detected_and_stable(self.latest_image)
-                    
-                    if line_info['detected']:
-                        # Line được detect, kiểm tra chất lượng và vị trí
-                        if self._is_line_in_valid_range(self.latest_image):
-                            # Line tốt, an toàn để bám
-                            self.correct_course(execution_line_center)
-                        else:
-                            # Line được detect nhưng chất lượng/vị trí không đạt
-                            # Chỉ khi này mới chuyển sang LINE_VALIDATION
-                            rospy.logwarn(f"SỰ KIỆN: Line detected nhưng chất lượng không đạt - "
-                                         f"area={line_info.get('area', 0):.0f}, "
-                                         f"coverage={line_info.get('coverage_ratio', 0):.3f}, "
-                                         f"contours={line_info.get('contour_count', 0)}. "
-                                         f"Chuyển sang LINE_VALIDATION.")
-                            self.line_validation_attempts = 0  # Reset counter
-                            self._set_state(RobotState.LINE_VALIDATION)
+                    # Kiểm tra xem line có nằm trong khoảng hợp lệ không trước khi bám
+                    if not self._is_line_in_valid_range(self.latest_image):
+                        rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
+                        self.line_validation_attempts = 0  # Reset counter
+                        if self.initialize_motion_flags == True:
                             continue
-                    else:
-                        # Không detect được line, có thể là giao lộ hoặc mất line
-                        rospy.logwarn(f"Không detect được line: {line_info.get('reason', 'UNKNOWN')}. "
-                                     "Có thể đang gần giao lộ hoặc mất line.")
-                        self.robot.stop()  # Dừng an toàn
+                        self._set_state(RobotState.LINE_VALIDATION)
+                        continue
+                    
+                    # An toàn để bám line, vì chúng ta biết phía trước không có giao lộ đột ngột.
+                    self.initialize_motion_flags = False
+                    self.correct_course(execution_line_center)
+                    
+                    # Phân tích và in góc line (nếu được bật)
                 else:
                     # Trường hợp hiếm: ROI xa thấy line nhưng ROI gần lại không. Dừng lại cho an toàn.
                     rospy.logwarn("Trạng thái không nhất quán: ROI xa thấy line, ROI gần không thấy. Tạm dừng an toàn.")
@@ -541,60 +427,32 @@ class JetBotController:
                     rate.sleep()
                     continue
 
-                # Lấy thông tin chi tiết về line
-                line_info = self._is_line_detected_and_stable(self.latest_image)
-                
-                if not line_info['detected']:
-                    # Không detect được line, tăng counter và thử lại
-                    self.line_validation_attempts += 1
-                    rospy.logwarn(f"LINE_VALIDATION: Không detect được line ({line_info['reason']}), "
-                                f"lần thử {self.line_validation_attempts}/{self.LINE_VALIDATION_ATTEMPTS}")
-                    
-                    if self.line_validation_attempts >= self.LINE_VALIDATION_ATTEMPTS:
-                        rospy.logerr("LINE_VALIDATION: Không thể detect line sau nhiều lần thử, chuyển sang tìm kiếm line mới.")
-                        self._set_state(RobotState.REACQUIRING_LINE)
-                        continue
-                    
-                    # Thử di chuyển nhẹ để tìm line
-                    self.robot.set_motors(self.BASE_SPEED * 0.3, self.BASE_SPEED * 0.3)
-                    time.sleep(0.2)
-                    self.robot.stop()
-                    continue
-
-                # Line được detect, kiểm tra chất lượng
+                # Kiểm tra line có nằm trong khoảng hợp lệ không
                 if self._is_line_in_valid_range(self.latest_image):
-                    rospy.loginfo(f"LINE_VALIDATION: Line hợp lệ sau {self.line_validation_attempts} lần thử. "
-                                 f"Area={line_info['area']:.0f}, coverage={line_info['coverage_ratio']:.3f}, "
-                                 f"aspect={line_info['aspect_ratio']:.2f}. Tiếp tục bám line.")
+                    rospy.loginfo("LINE_VALIDATION: Line position hợp lệ, tiếp tục bám line.")
                     self._set_state(RobotState.DRIVING_STRAIGHT)
                     continue
                 else:
-                    # Line được detect nhưng vẫn chưa đạt chất lượng
+                    # Line không hợp lệ, thử điều chỉnh
                     self.line_validation_attempts += 1
-                    rospy.logwarn(f"LINE_VALIDATION: Line detected nhưng chưa đạt chất lượng, "
-                                f"lần thử {self.line_validation_attempts}/{self.LINE_VALIDATION_ATTEMPTS}")
+                    rospy.logwarn(f"LINE_VALIDATION: Line không hợp lệ, lần thử {self.line_validation_attempts}/{self.LINE_VALIDATION_ATTEMPTS}")
                     
                     if self.line_validation_attempts >= self.LINE_VALIDATION_ATTEMPTS:
-                        rospy.logerr("LINE_VALIDATION: Line luôn không đạt chất lượng, chuyển sang tìm kiếm line mới.")
+                        rospy.logerr("LINE_VALIDATION: Đã thử tối đa, chuyển sang tìm kiếm line mới.")
                         self._set_state(RobotState.REACQUIRING_LINE)
                         continue
                     
-                    # Thử điều chỉnh nhẹ về phía line center
-                    line_center = line_info['center']
+                    # Thử điều chỉnh nhẹ để tìm lại line
+                    line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
                     if line_center is not None:
                         error = line_center - (self.WIDTH / 2)
-                        if abs(error) > 5:  # Chỉ điều chỉnh khi lệch đáng kể
+                        if abs(error) > 0:
                             # Điều chỉnh nhẹ về phía line
-                            adj = np.clip(error / (self.WIDTH / 2) * 0.15, -0.05, 0.05)  # Giới hạn rất nhỏ
-                            self.robot.set_motors(self.BASE_SPEED * 0.4 + adj, self.BASE_SPEED * 0.4 - adj)
-                            time.sleep(0.3)
+                            adj = np.clip(error / (self.WIDTH / 2) * 0.3, -0.1, 0.1)
+                            self.robot.set_motors(self.BASE_SPEED * 0.5 + adj, self.BASE_SPEED * 0.5 - adj)
                         else:
-                            # Line đã ở giữa nhưng chất lượng chưa tốt, di chuyển thẳng nhẹ
-                            self.robot.set_motors(self.BASE_SPEED * 0.4, self.BASE_SPEED * 0.4)
-                            time.sleep(0.2)
-                        self.robot.stop()
+                            self.robot.set_motors(self.BASE_SPEED * 0.5, self.BASE_SPEED * 0.5)
                     else:
-                        # Không có center, dừng lại
                         self.robot.stop()
                 
                 # Timeout check
@@ -641,6 +499,7 @@ class JetBotController:
                 
                 if line_center_x is not None:
                     rospy.loginfo("Đã tìm thấy line mới! Chuyển sang chế độ bám line.")
+                    self.initialize_motion_flags = False
                     self._set_state(RobotState.DRIVING_STRAIGHT)
                     continue
                 
@@ -769,92 +628,27 @@ class JetBotController:
             return int(M["m10"] / M["m00"])
         return None
     
-    def _is_line_detected_and_stable(self, image):
+    def _is_line_in_valid_range(self, image):
         """
-        Kiểm tra xem line có được detect ổn định và đáp ứng các tiêu chí chất lượng không.
+        Kiểm tra xem vạch kẻ có nằm trong khoảng hợp lệ không.
         Returns: 
-            - dict với các thông tin về line detection
+            - True nếu line nằm trong khoảng cho phép
+            - False nếu line quá lệch hoặc không tìm thấy
         """
         if image is None:
-            return {'detected': False, 'reason': 'NO_IMAGE'}
+            return False
             
         line_center = self._get_line_center(image, self.ROI_Y, self.ROI_H)
         if line_center is None:
-            return {'detected': False, 'reason': 'NO_LINE_FOUND'}
-        
-        # Kiểm tra line area (diện tích của line contour)
-        roi = image[self.ROI_Y : self.ROI_Y + self.ROI_H, :]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        _, thresh_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
-        combined_mask = cv2.bitwise_or(color_mask, thresh_mask)
-        
-        # Tính diện tích line
-        line_pixels = np.sum(combined_mask > 0)
-        roi_pixels = combined_mask.shape[0] * combined_mask.shape[1]
-        line_coverage_ratio = line_pixels / roi_pixels
-        
-        # Kiểm tra tính liên tục của line (continuity)
-        _, contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return {'detected': False, 'reason': 'NO_CONTOURS'}
-        
-        # Lấy contour lớn nhất
-        largest_contour = max(contours, key=cv2.contourArea)
-        contour_area = cv2.contourArea(largest_contour)
-        
-        # Tính aspect ratio của bounding box
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        aspect_ratio = w / h if h > 0 else 0
-        
-        return {
-            'detected': True,
-            'center': line_center,
-            'area': contour_area,
-            'coverage_ratio': line_coverage_ratio,
-            'aspect_ratio': aspect_ratio,
-            'pixel_count': line_pixels,
-            'contour_count': len(contours)
-        }
-    
-    def _is_line_in_valid_range(self, image):
-        """
-        Kiểm tra xem vạch kẻ có nằm trong khoảng hợp lệ và đủ chất lượng không.
-        Returns: 
-            - True nếu line nằm trong khoảng cho phép và đủ chất lượng
-            - False nếu line quá lệch hoặc chất lượng kém
-        """
-        line_info = self._is_line_detected_and_stable(image)
-        
-        if not line_info['detected']:
-            rospy.logwarn(f"Line validation failed: {line_info['reason']}")
             return False
-        
-        line_center = line_info['center']
+            
         image_center = self.WIDTH / 2
         max_deviation = self.WIDTH * self.LINE_CENTER_TOLERANCE
         deviation = abs(line_center - image_center)
         
-        # Kiểm tra vị trí line
-        position_valid = deviation <= max_deviation
+        is_valid = deviation <= max_deviation
         
-        # Kiểm tra chất lượng line (chỉ khi được bật)
-        quality_valid = True
-        if self.LINE_QUALITY_CHECK_ENABLED:
-            quality_valid = (
-                line_info['area'] >= self.LINE_MIN_AREA_THRESHOLD and
-                line_info['coverage_ratio'] >= self.LINE_MIN_COVERAGE_RATIO and
-                line_info['aspect_ratio'] >= self.LINE_MIN_ASPECT_RATIO and
-                line_info['contour_count'] <= self.LINE_MAX_CONTOUR_COUNT
-            )
-        
-        is_valid = position_valid and quality_valid
-        
-        rospy.loginfo(f"Line validation: center={line_center}, deviation={deviation:.1f}, "
-                     f"area={line_info['area']:.0f}, coverage={line_info['coverage_ratio']:.3f}, "
-                     f"aspect={line_info['aspect_ratio']:.2f}, contours={line_info['contour_count']}, "
-                     f"position_ok={position_valid}, quality_ok={quality_valid}, final={is_valid}")
+        rospy.loginfo(f"Line validation: center={line_center}, deviation={deviation:.1f}, max_allowed={max_deviation:.1f}, valid={is_valid}")
         return is_valid
     
     def calculate_line_angle_from_camera(self):
