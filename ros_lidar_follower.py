@@ -141,7 +141,7 @@ class JetBotController:
         self.ROI_Y = int(self.HEIGHT * 0.85)
         self.ROI_H = int(self.HEIGHT * 0.15)
         self.ROI_CENTER_WIDTH_PERCENT = 0.5
-        self.LOOKAHEAD_ROI_Y = int(self.HEIGHT * 0.60) # Vị trí Y cao hơn
+        self.LOOKAHEAD_ROI_Y = int(self.HEIGHT * 0.5) # Vị trí Y cao hơn
         self.LOOKAHEAD_ROI_H = int(self.HEIGHT * 0.15) # Chiều cao tương tự
 
         self.CORRECTION_GAIN = 0.5
