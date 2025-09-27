@@ -407,8 +407,6 @@ class JetBotController:
                     self.correct_course(execution_line_center)
                     
                     # Phân tích và in góc line (nếu được bật)
-                    if self.angle_analysis_enabled:
-                        self.analyze_and_print_line_angles()
                 else:
                     # Trường hợp hiếm: ROI xa thấy line nhưng ROI gần lại không. Dừng lại cho an toàn.
                     rospy.logwarn("Trạng thái không nhất quán: ROI xa thấy line, ROI gần không thấy. Tạm dừng an toàn.")
