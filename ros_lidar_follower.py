@@ -443,8 +443,9 @@ class JetBotController:
                         error = line_center - (self.WIDTH / 2)
                         if abs(error) > 0:
                             # Điều chỉnh nhẹ về phía line
+                            # Giảm tốc độ cơ sở để có thể điều chỉnh chính xác hơn
                             adj = np.clip(error / (self.WIDTH / 2) * 0.3, -0.1, 0.1)
-                            self.robot.set_motors(self.BASE_SPEED * 0.5 + adj, self.BASE_SPEED * 0.5 - adj)
+                            self.robot.set_motors(self.BASE_SPEED * 0.3 + adj, self.BASE_SPEED * 0.3 - adj)
                         else:
                             self.robot.set_motors(self.BASE_SPEED * 0.5, self.BASE_SPEED * 0.5)
                     else:
@@ -464,7 +465,7 @@ class JetBotController:
                 
                 if rospy.get_time() - self.state_change_time > self.INTERSECTION_APPROACH_DURATION:
                     rospy.loginfo("Đã tiến vào trung tâm giao lộ. Dừng lại để xử lý.")
-                    self.robot.stop(); time.sleep(0.5)
+                    self.robot.stop(); time.sleep(1.2)
 
                     self.current_node_id = self.target_node_id
                     rospy.loginfo(f"==> ĐÃ ĐẾN node {self.current_node_id}.")
@@ -473,7 +474,7 @@ class JetBotController:
                         rospy.loginfo("ĐÃ ĐẾN ĐÍCH CUỐI CÙNG!")
                         self._set_state(RobotState.GOAL_REACHED)
                     else:
-                        self._set_state(RobotState.HANDLING_EVENT)
+                        self._set_state(RobotState.HANzDLING_EVENT)
                         self.handle_intersection()
 
             # ===================================================================
@@ -903,7 +904,7 @@ class JetBotController:
         self.robot.set_motors(forward_speed, forward_speed)
 
         # Di chuyển trong 1.5 giây (có thể điều chỉnh)
-        time.sleep(1.5)
+        time.sleep(1)
         
         # Dừng lại
         self.robot.stop()
