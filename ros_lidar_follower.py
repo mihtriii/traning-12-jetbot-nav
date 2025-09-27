@@ -59,6 +59,12 @@ class JetBotController:
         self.last_angle_analysis_time = 0
         self.angle_analysis_interval = 2.0  # Analyze every 2 seconds
         
+        # Camera-based intersection detection
+        self.camera_intersection_detected = False
+        self.camera_detection_time = 0
+        self.waiting_for_lidar_confirmation = False
+        self.lidar_confirmation_timeout = 3.0  # 3 seconds to wait for LiDAR
+        
         rospy.Subscriber('/scan', LaserScan, self.detector.callback)
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
         rospy.loginfo("Đã đăng ký vào các topic /scan và /csi_cam_0/image_raw.")
@@ -171,6 +177,14 @@ class JetBotController:
         self.LINE_VALIDATION_TIMEOUT = 2.0  # Thời gian tối đa để validate line position
         self.LINE_CENTER_TOLERANCE = 0.2    # Tỷ lệ cho phép line lệch khỏi center (20% width)
         self.LINE_VALIDATION_ATTEMPTS = 8   # Số lần thử validate tối đa
+        
+        # Parameters cho Camera-LiDAR Intersection Detection
+        self.CAMERA_LIDAR_INTERSECTION_MODE = True  # Enable camera-first detection
+        self.CROSS_DETECTION_ROI_Y_PERCENT = 0.50   # Vị trí ROI detect cross (50% từ trên)
+        self.CROSS_DETECTION_ROI_H_PERCENT = 0.20   # Chiều cao ROI detect cross (20%)
+        self.CROSS_MIN_ASPECT_RATIO = 2.0           # Aspect ratio tối thiểu cho đường ngang
+        self.CROSS_MIN_WIDTH_RATIO = 0.4            # Width ratio tối thiểu so với ROI
+        self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
 
     def initialize_hardware(self):
         try:
@@ -348,10 +362,10 @@ class JetBotController:
                     rate.sleep()
                     continue
 
-                # --- BƯỚC 1: KIỂM TRA TÍN HIỆU ƯU TIÊN CAO (LiDAR) ---
-                # Đây là tín hiệu đáng tin cậy nhất, nếu nó kích hoạt, xử lý ngay.
-                if self.detector.process_detection():
-                    rospy.loginfo("SỰ KIỆN (LiDAR): Phát hiện giao lộ. Dừng ngay lập tức.")
+                # --- BƯỚC 1: KIỂM TRA GIAO LỘ VỚI CAMERA-LIDAR CONFIRMATION ---
+                # Camera detect trước, LiDAR confirm sau để tránh nhiễu
+                if self.check_camera_lidar_intersection():
+                    rospy.loginfo("SỰ KIỆN (Camera+LiDAR): Xác nhận giao lộ. Dừng ngay lập tức.")
                     self.robot.stop()
                     time.sleep(0.5) # Chờ robot dừng hẳn
 
@@ -826,6 +840,166 @@ class JetBotController:
                 print(f"   • Combined: {combined_angle:+6.2f}° (with caution)")
         
         print("="*60 + "\n")
+    
+    def detect_camera_intersection(self):
+        """
+        Phát hiện giao lộ từ camera bằng cách tìm đường ngang vuông góc với line hiện tại.
+        Returns: (detected, confidence, cross_line_center)
+        """
+        if self.latest_image is None:
+            return False, "NO_IMAGE", None
+        
+        # Lấy ROI để tìm đường ngang (cao hơn ROI chính để detect sớm hơn)
+        cross_detection_roi_y = int(self.HEIGHT * self.CROSS_DETECTION_ROI_Y_PERCENT)
+        cross_detection_roi_h = int(self.HEIGHT * self.CROSS_DETECTION_ROI_H_PERCENT)
+        
+        roi = self.latest_image[cross_detection_roi_y:cross_detection_roi_y + cross_detection_roi_h, :]
+        
+        # Chuyển sang HSV và tạo mask cho line
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        line_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        
+        # Sử dụng morphological operations để làm sạch
+        kernel = np.ones((3,3), np.uint8)
+        line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_CLOSE, kernel)
+        line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Tìm contours
+        _, contours, _ = cv2.findContours(line_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return False, "NO_CONTOURS", None
+        
+        # Phân tích các contours để tìm đường ngang
+        roi_height, roi_width = line_mask.shape
+        main_line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+        
+        if main_line_center is None:
+            return False, "NO_MAIN_LINE", None
+        
+        # Tìm contours có khả năng là đường ngang
+        cross_candidates = []
+        
+        for contour in contours:
+            # Tính bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
+            
+            # Kiểm tra aspect ratio - đường ngang sẽ có width > height
+            aspect_ratio = w / h if h > 0 else 0
+            
+            # Kiểm tra kích thước tương đối
+            width_ratio = w / roi_width
+            height_ratio = h / roi_height
+            
+            # Criteria cho đường ngang:
+            # 1. Aspect ratio cao (rộng hơn cao)
+            # 2. Chiều rộng đáng kể so với ROI
+            # 3. Không quá cao
+            if (aspect_ratio > self.CROSS_MIN_ASPECT_RATIO and 
+                width_ratio > self.CROSS_MIN_WIDTH_RATIO and 
+                height_ratio < self.CROSS_MAX_HEIGHT_RATIO):
+                
+                # Tính center của candidate
+                M = cv2.moments(contour)
+                if M["m00"] > 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    
+                    cross_candidates.append({
+                        'contour': contour,
+                        'center_x': cx,
+                        'center_y': cy,
+                        'width': w,
+                        'height': h,
+                        'aspect_ratio': aspect_ratio,
+                        'area': cv2.contourArea(contour)
+                    })
+        
+        if not cross_candidates:
+            return False, "NO_CROSS_CANDIDATES", None
+        
+        # Chọn candidate tốt nhất (lớn nhất và gần center nhất)
+        best_candidate = None
+        best_score = 0
+        
+        for candidate in cross_candidates:
+            # Score dựa trên area và position
+            area_score = candidate['area'] / (roi_width * roi_height)  # Normalize
+            center_score = 1.0 - abs(candidate['center_x'] - roi_width/2) / (roi_width/2)  # Closer to center = higher
+            
+            total_score = area_score * 0.6 + center_score * 0.4
+            
+            if total_score > best_score:
+                best_score = total_score
+                best_candidate = candidate
+        
+        if best_candidate is None:
+            return False, "NO_GOOD_CANDIDATE", None
+        
+        # Đánh giá confidence
+        confidence_level = "LOW"
+        if best_score > 0.7:
+            confidence_level = "HIGH"
+        elif best_score > 0.4:
+            confidence_level = "MEDIUM"
+        
+        # Convert back to full image coordinates
+        cross_line_center = best_candidate['center_x']
+        
+        return True, confidence_level, cross_line_center
+    
+    def check_camera_lidar_intersection(self):
+        """
+        Kiểm tra giao lộ với logic: Camera detect trước, LiDAR confirm sau.
+        Returns: True if intersection confirmed by both sensors
+        """
+        current_time = rospy.get_time()
+        
+        # Bước 1: Camera detection
+        if not self.camera_intersection_detected and not self.waiting_for_lidar_confirmation:
+            camera_detected, camera_conf, cross_center = self.detect_camera_intersection()
+            
+            if camera_detected:
+                rospy.loginfo(f"📷 CAMERA: Intersection detected! Confidence: {camera_conf}")
+                rospy.loginfo(f"📷 Cross line center: {cross_center}, Main line center: {self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)}")
+                
+                # Chỉ trigger nếu confidence đủ cao
+                if camera_conf in ["HIGH", "MEDIUM"]:
+                    self.camera_intersection_detected = True
+                    self.camera_detection_time = current_time
+                    self.waiting_for_lidar_confirmation = True
+                    rospy.loginfo("📷 CAMERA: Waiting for LiDAR confirmation...")
+                    return False  # Chưa confirm, chỉ mới detect
+        
+        # Bước 2: Chờ LiDAR confirmation
+        if self.waiting_for_lidar_confirmation:
+            # Kiểm tra timeout
+            if current_time - self.camera_detection_time > self.lidar_confirmation_timeout:
+                rospy.logwarn("⏰ TIMEOUT: LiDAR didn't confirm intersection, resetting camera detection")
+                self.reset_intersection_detection()
+                return False
+            
+            # Kiểm tra LiDAR confirmation
+            if self.detector.process_detection():
+                rospy.loginfo("✅ INTERSECTION CONFIRMED: Both camera and LiDAR detected intersection!")
+                rospy.loginfo("📡 LiDAR confirmed camera's intersection detection")
+                
+                # Reset flags
+                self.reset_intersection_detection()
+                return True  # Intersection confirmed!
+            else:
+                # Vẫn chờ LiDAR confirmation
+                elapsed = current_time - self.camera_detection_time
+                rospy.loginfo(f"⏳ Waiting for LiDAR confirmation... ({elapsed:.1f}s/{self.lidar_confirmation_timeout}s)")
+                return False
+        
+        return False
+    
+    def reset_intersection_detection(self):
+        """Reset trạng thái detection."""
+        self.camera_intersection_detected = False
+        self.camera_detection_time = 0
+        self.waiting_for_lidar_confirmation = False
     
     def correct_course(self, line_center_x):
         """

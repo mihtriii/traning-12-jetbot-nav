@@ -13,8 +13,8 @@ import math
 class SimpleOppositeDetector:
     def __init__(self):
         # Các tham số cố định
-        self.min_distance = 0.22
-        self.max_distance = 0.30
+        self.min_distance = 0.15
+        self.max_distance = 0.3
         self.object_min_points = 10
         self.distance_threshold = 0.1
         self.angle_range = 10.0
@@ -94,65 +94,24 @@ class SimpleOppositeDetector:
     def are_opposite(self, angle1, angle2):
         return abs(self.get_angle_difference(angle1, angle2) - 180.0) <= self.opposite_tolerance
     
-    def get_diagonal_type(self, angle):
-        """
-        Xác định loại trục chéo dựa trên góc.
-        Returns: 'front_right', 'back_right', 'back_left', 'front_left'
-        """
-        # Normalize angle to 0-360
-        normalized_angle = angle % 360
-        
-        if 30 <= normalized_angle <= 60:      # 45° ±15°
-            return 'front_right'
-        elif 120 <= normalized_angle <= 150:  # 135° ±15°  
-            return 'back_right'
-        elif 210 <= normalized_angle <= 240:  # 225° ±15°
-            return 'back_left'
-        elif 300 <= normalized_angle <= 330:  # 315° ±15°
-            return 'front_left'
-        else:
-            return 'unknown'
-    
     def find_all_objects(self, scan):
-        # (logic phát hiện vật thể - chỉ các trục chéo 45°)
+        # (logic phát hiện vật thể)
         ranges = np.array(scan.ranges)
         n = len(ranges)
         angle_increment_deg = math.degrees(scan.angle_increment)
         points_per_range = int(self.angle_range / angle_increment_deg)
         objects = []
-        
-        # Định nghĩa các trục chéo mục tiêu (45°, 135°, 225°, 315°)
-        target_diagonal_angles = [45, 135, 225, 315]  # degrees
-        diagonal_tolerance = 10  # ±10° around each diagonal
-        
         for start_idx in range(0, n, points_per_range // 2):
             end_idx = min(start_idx + points_per_range, n)
             if end_idx - start_idx < points_per_range // 2: continue
-            
             zone_ranges = ranges[start_idx:end_idx]
             center_idx = start_idx + (end_idx - start_idx) // 2
             center_angle = self.index_to_angle(center_idx, scan)
-            
-            # Normalize angle to 0-360
-            normalized_angle = center_angle % 360
-            
-            # Kiểm tra xem zone có gần trục chéo nào không
-            is_near_diagonal = False
-            for target_angle in target_diagonal_angles:
-                angle_diff = min(abs(normalized_angle - target_angle), 
-                               360 - abs(normalized_angle - target_angle))
-                if angle_diff <= diagonal_tolerance:
-                    is_near_diagonal = True
-                    break
-            
-            # Chỉ xử lý zone nếu nó gần trục chéo
-            if is_near_diagonal:
-                obj = self.detect_object_in_zone(zone_ranges, f"Zone_{start_idx}")
-                if obj:
-                    obj['center_angle'] = center_angle
-                    obj['center_index'] = center_idx
-                    obj['diagonal_type'] = self.get_diagonal_type(normalized_angle)
-                    objects.append(obj)
+            obj = self.detect_object_in_zone(zone_ranges, f"Zone_{start_idx}")
+            if obj:
+                obj['center_angle'] = center_angle
+                obj['center_index'] = center_idx
+                objects.append(obj)
         return objects
 
     def find_opposite_pairs(self, objects):
