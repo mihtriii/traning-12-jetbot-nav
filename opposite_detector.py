@@ -17,10 +17,10 @@ class SimpleOppositeDetector:
         self.max_distance = 0.4
         self.object_min_points = 10
         self.distance_threshold = 0.1
-        self.angle_range = 10.0
+        self.angle_range = 15.0
         self.detection_interval = 2.0
         self.opposite_tolerance = 5.0
-        self.min_opposite_distance = 45.0
+        self.min_opposite_distance = 40.0
         
         # Biến điều khiển
         self.scanning_active = False

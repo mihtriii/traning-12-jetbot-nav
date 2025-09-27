@@ -182,8 +182,8 @@ class JetBotController:
         self.CAMERA_LIDAR_INTERSECTION_MODE = True  # Enable camera-first detection
         self.CROSS_DETECTION_ROI_Y_PERCENT = 0.50   # Vị trí ROI detect cross (50% từ trên)
         self.CROSS_DETECTION_ROI_H_PERCENT = 0.20   # Chiều cao ROI detect cross (20%)
-        self.CROSS_MIN_ASPECT_RATIO = 2.0           # Aspect ratio tối thiểu cho đường ngang
-        self.CROSS_MIN_WIDTH_RATIO = 0.4            # Width ratio tối thiểu so với ROI
+        self.CROSS_MIN_ASPECT_RATIO = 1.5           # Aspect ratio tối thiểu cho đường ngang
+        self.CROSS_MIN_WIDTH_RATIO = 0.3            # Width ratio tối thiểu so với ROI
         self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
 
     def initialize_hardware(self):
@@ -904,7 +904,7 @@ class JetBotController:
         self.robot.set_motors(forward_speed, forward_speed)
 
         # Di chuyển trong 1.5 giây (có thể điều chỉnh)
-        time.sleep(1)
+        time.sleep(1.5)
         
         # Dừng lại
         self.robot.stop()
