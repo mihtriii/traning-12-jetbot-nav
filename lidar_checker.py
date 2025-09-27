@@ -20,7 +20,7 @@ class LidarChecker:
         
         # Detection parameters
         self.min_distance = 0.15
-        self.max_distance = 2.0
+        self.max_distance = 0.3
         self.front_angle_range = 45  # ±45 degrees for front sector
         
         # ROS subscriber
