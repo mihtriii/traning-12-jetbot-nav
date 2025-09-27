@@ -578,10 +578,10 @@ class JetBotController:
         final_mask = cv2.bitwise_and(color_mask, focus_mask)
 
         # (Tùy chọn) Hiển thị mask để debug
-        cv2.imshow("Color Mask", color_mask)
-        cv2.imshow("Focus Mask", focus_mask)
-        cv2.imshow("Final Mask", final_mask)
-        cv2.waitKey(1)
+        # cv2.imshow("Color Mask", color_mask)
+        # cv2.imshow("Focus Mask", focus_mask)
+        # cv2.imshow("Final Mask", final_mask)
+        # cv2.waitKey(1)
 
         # Tìm contours trên mặt nạ cuối cùng đã được lọc
         _, contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
