@@ -202,13 +202,13 @@ class JetBotController:
         self.LINE_CENTER_TOLERANCE = 0.2    # Tỷ lệ cho phép line lệch khỏi center (20% width)
         self.LINE_VALIDATION_ATTEMPTS = 8   # Số lần thử validate tối đa
         
-        # Parameters cho Camera-LiDAR Intersection Detection - CẢI TIẾN ĐỘ NHẠY
+        # Parameters cho Camera-LiDAR Intersection Detection - ĐIỀU CHỈNH ĐỂ TRÁNH DỪNG SỚM
         self.CAMERA_LIDAR_INTERSECTION_MODE = True  # Enable camera-first detection
-        self.CROSS_DETECTION_ROI_Y_PERCENT = 0.45   # Hạ xuống để detect sớm hơn
-        self.CROSS_DETECTION_ROI_H_PERCENT = 0.30   # Tăng chiều cao ROI để bao phủ rộng hơn
-        self.CROSS_MIN_ASPECT_RATIO = 1.5           # Giảm xuống để nhạy hơn (từ 2.0)
-        self.CROSS_MIN_WIDTH_RATIO = 0.25           # Giảm xuống để detect line nhỏ hơn (từ 0.4)
-        self.CROSS_MAX_HEIGHT_RATIO = 0.9           # Tăng lên để cho phép line cao hơn (từ 0.8)
+        self.CROSS_DETECTION_ROI_Y_PERCENT = 0.55   # TĂNG từ 0.45 -> 0.55 (detect gần hơn)
+        self.CROSS_DETECTION_ROI_H_PERCENT = 0.25   # GIẢM từ 0.30 -> 0.25 (vùng nhỏ hơn, chính xác hơn)
+        self.CROSS_MIN_ASPECT_RATIO = 2.0           # TĂNG từ 1.5 -> 2.0 (strict hơn để tránh nhiễu)
+        self.CROSS_MIN_WIDTH_RATIO = 0.35           # TĂNG từ 0.25 -> 0.35 (chỉ detect cross thật lớn)
+        self.CROSS_MAX_HEIGHT_RATIO = 0.7           # GIẢM từ 0.9 -> 0.7 (tránh detect line dọc nhầm)
 
     def initialize_hardware(self):
         try:
@@ -810,18 +810,17 @@ class JetBotController:
         if not all_contours:
             return False, "NO_CONTOURS", None
         
-        # === BƯỚC 4: KIỂM TRA MAIN LINE (RELAXED) ===
+        # === BƯỚC 4: KIỂM TRA MAIN LINE (STRICT) ===
         main_line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
-        # Nới lỏng yêu cầu main line để không bỏ lỡ
-        # if main_line_center is None:
-        #     return False, "NO_MAIN_LINE", None
+        if main_line_center is None:
+            return False, "NO_MAIN_LINE", None  # Phải có main line mới proceed
         
-        # === BƯỚC 5: PHÂN TÍCH CONTOURS VỚI TIÊU CHÍ RELAXED ===
+        # === BƯỚC 5: PHÂN TÍCH CONTOURS VỚI TIÊU CHÍ STRICT HỚN ===
         roi_height, roi_width = line_mask.shape
         cross_candidates = []
         
-        # Giảm ngưỡng để không bỏ lỡ
-        min_contour_area = 30  # Giảm từ 50 xuống 30
+        # Tăng ngưỡng để loại bỏ nhiễu nhỏ
+        min_contour_area = 80  # Tăng từ 30 lên 80 để tránh nhiễu
         
         for contour in all_contours:
             area = cv2.contourArea(contour)
@@ -831,22 +830,15 @@ class JetBotController:
             # Tính bounding rectangle
             x, y, w, h = cv2.boundingRect(contour)
             
-            # === TIÊU CHÍ RELAXED HỚN ===
+            # === TIÊU CHÍ STRICT HỚN ĐỂ TRÁNH FALSE POSITIVE ===
             aspect_ratio = w / h if h > 0 else 0
             width_ratio = w / roi_width
             height_ratio = h / roi_height
             
-            # Nới lỏng các tiêu chí để không bỏ lỡ:
-            # 1. Aspect ratio thấp hơn (từ 2.0 -> 1.5)
-            # 2. Width ratio nhỏ hơn (từ 0.4 -> 0.25)  
-            # 3. Height ratio cao hơn (từ 0.8 -> 0.9)
-            relaxed_min_aspect = max(1.5, self.CROSS_MIN_ASPECT_RATIO * 0.75)
-            relaxed_min_width = max(0.25, self.CROSS_MIN_WIDTH_RATIO * 0.6)
-            relaxed_max_height = min(0.9, self.CROSS_MAX_HEIGHT_RATIO * 1.1)
-            
-            if (aspect_ratio > relaxed_min_aspect and 
-                width_ratio > relaxed_min_width and 
-                height_ratio < relaxed_max_height):
+            # Sử dụng parameters gốc (không relaxed) để strict hơn
+            if (aspect_ratio > self.CROSS_MIN_ASPECT_RATIO and 
+                width_ratio > self.CROSS_MIN_WIDTH_RATIO and 
+                height_ratio < self.CROSS_MAX_HEIGHT_RATIO):
                 
                 # === PHÂN TÍCH HÌNH DẠNG BẰNG MOMENT ===
                 M = cv2.moments(contour)
@@ -915,17 +907,17 @@ class JetBotController:
                 best_score = total_score
                 best_candidate = candidate
         
-        if best_candidate is None or best_score < 0.15:  # Giảm threshold từ 0.3 -> 0.15
+        if best_candidate is None or best_score < 0.5:  # TĂNG từ 0.15 -> 0.5 để strict hơn
             return False, "NO_GOOD_CANDIDATE", None
         
-        # === BƯỚC 7: CONFIDENCE ASSESSMENT (RELAXED) ===
+        # === BƯỚC 7: CONFIDENCE ASSESSMENT (STRICT HỚN) ===
         confidence_level = "LOW"
-        if best_score > 0.6:      # Giảm từ 0.8 -> 0.6
+        if best_score > 0.8:      # Tăng từ 0.6 -> 0.8
             confidence_level = "HIGH"
-        elif best_score > 0.35:   # Giảm từ 0.6 -> 0.35
+        elif best_score > 0.65:   # Tăng từ 0.35 -> 0.65
             confidence_level = "MEDIUM"
         
-        # === BƯỚC 8: TEMPORAL SMOOTHING (NẾU CẦN) ===
+        # === BƯỚC 8: TEMPORAL CONSISTENCY NGHIÊM NGẶT ===
         # Lưu trữ detection history cho smoothing
         if not hasattr(self, 'cross_detection_buffer'):
             self.cross_detection_buffer = []
@@ -938,28 +930,35 @@ class JetBotController:
             'timestamp': rospy.get_time()
         }
         
-        # Thêm vào buffer và giữ 3 detection gần nhất
+        # Thêm vào buffer và giữ 5 detection gần nhất
         self.cross_detection_buffer.append(current_detection)
-        if len(self.cross_detection_buffer) > 3:
+        if len(self.cross_detection_buffer) > 5:
             self.cross_detection_buffer.pop(0)
         
-        # Kiểm tra consistency trong buffer
+        # Kiểm tra consistency trong buffer - CẦN NHIỀU HƠN ĐỂ CONFIRM
         recent_detections = [d for d in self.cross_detection_buffer 
-                           if rospy.get_time() - d['timestamp'] < 1.0]  # Trong 1 giây
+                           if rospy.get_time() - d['timestamp'] < 0.8]  # Trong 0.8 giây
         
         positive_detections = [d for d in recent_detections if d['detected']]
         
-        # Nếu có ít nhất 1/3 detections gần đây là positive -> confirm
-        if len(positive_detections) >= max(1, len(recent_detections) // 3):
-            cross_line_center = best_candidate['center_x']
-            
-            # Debug info
-            rospy.loginfo(f"📷 CROSS DETECTED: Score={best_score:.3f}, AR={best_candidate['aspect_ratio']:.2f}, "
-                         f"Size={best_candidate['width']}x{best_candidate['height']}, Conf={confidence_level}")
-            
-            return True, confidence_level, cross_line_center
+        # CẦN ÍT NHẤT 3/5 detections gần đây là positive -> confirm (strict hơn)
+        min_required = max(3, len(recent_detections) * 2 // 3)  # Ít nhất 60% phải positive
         
-        return False, "INSUFFICIENT_TEMPORAL_CONSISTENCY", None
+        if len(positive_detections) >= min_required and len(recent_detections) >= 3:
+            # THÊM KIỂM TRA: Tất cả detections phải có confidence MEDIUM trở lên
+            high_conf_detections = [d for d in positive_detections 
+                                  if d['confidence'] in ['HIGH', 'MEDIUM']]
+            
+            if len(high_conf_detections) >= min_required - 1:
+                cross_line_center = best_candidate['center_x']
+                
+                # Debug info
+                rospy.loginfo(f"📷 CROSS CONFIRMED: Score={best_score:.3f}, "
+                             f"Conf={confidence_level}, Consistency={len(positive_detections)}/{len(recent_detections)}")
+                
+                return True, confidence_level, cross_line_center
+        
+        return False, "INSUFFICIENT_CONSISTENCY", None
     
     def check_camera_lidar_intersection(self):
         """
@@ -976,8 +975,8 @@ class JetBotController:
                 rospy.loginfo(f"📷 CAMERA: Intersection detected! Confidence: {camera_conf}")
                 rospy.loginfo(f"📷 Cross line center: {cross_center}, Main line center: {self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)}")
                 print(f"📷 Cross line center: {cross_center}, Main line center: {self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)}")
-                # Chỉ trigger nếu confidence đủ cao
-                if camera_conf in ["HIGH", "MEDIUM"]:
+                # Chỉ trigger nếu confidence ÍT NHẤT là MEDIUM (không chấp nhận LOW)
+                if camera_conf in ["HIGH", "MEDIUM"]:  # Không chấp nhận "LOW"
                     self.camera_intersection_detected = True
                     self.camera_detection_time = current_time
                     
@@ -988,6 +987,9 @@ class JetBotController:
                     self.waiting_for_lidar_confirmation = True
                     rospy.loginfo("📷 CAMERA: Waiting for LiDAR confirmation...")
                     return False  # Chưa confirm, chỉ mới detect
+                else:
+                    rospy.loginfo(f"📷 CAMERA: Detection confidence too low ({camera_conf}), ignoring")
+                    return False
         
         # Bước 2: Chờ LiDAR confirmation
         if self.waiting_for_lidar_confirmation:
@@ -1029,8 +1031,8 @@ class JetBotController:
         forward_speed = self.BASE_SPEED * 0.7
         self.robot.set_motors(forward_speed, forward_speed)
 
-        # Di chuyển trong 1.5 giây (có thể điều chỉnh)
-        time.sleep(1.5)
+        # TĂNG thời gian di chuyển từ 1.5 -> 2.2 giây để đảm bảo đến giao lộ thật
+        time.sleep(2.2)
         
         # Dừng lại
         self.robot.stop()
