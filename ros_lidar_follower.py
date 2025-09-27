@@ -903,7 +903,7 @@ class JetBotController:
         self.robot.set_motors(forward_speed, forward_speed)
         
         # Di chuyển trong 0.8 giây (có thể điều chỉnh)
-        time.sleep(0.8)
+        time.sleep(1.2)
         
         # Dừng lại
         self.robot.stop()
