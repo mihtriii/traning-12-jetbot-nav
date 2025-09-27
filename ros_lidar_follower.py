@@ -21,6 +21,7 @@ from map_navigator import MapNavigator
 
 class RobotState(Enum):
     DRIVING_STRAIGHT = 1
+    LINE_VALIDATION = 1.5
     APPROACHING_INTERSECTION = 2
     HANDLING_EVENT = 3
     LEAVING_INTERSECTION = 4
@@ -56,6 +57,7 @@ class JetBotController:
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
         rospy.loginfo("Đã đăng ký vào các topic /scan và /csi_cam_0/image_raw.")
         self.state_change_time = rospy.get_time()
+        self.line_validation_attempts = 0  # Counter cho LINE_VALIDATION state
         self._set_state(RobotState.DRIVING_STRAIGHT, initial=True)
         rospy.loginfo("Khởi tạo hoàn tất. Sẵn sàng hoạt động.")
 
@@ -106,7 +108,7 @@ class JetBotController:
         cv2.rectangle(debug_frame, (0, self.LOOKAHEAD_ROI_Y), (self.WIDTH-1, self.LOOKAHEAD_ROI_Y + self.LOOKAHEAD_ROI_H), (0, 255, 255), 1)
 
         # 2. Vẽ trạng thái hiện tại
-        state_text = f"State: {self.current_state.name}"
+        state_text = f"State: {self.current_state.name if self.current_state else 'None'}"
         cv2.putText(debug_frame, state_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         
         # 3. Vẽ line và trọng tâm (nếu robot đang bám line)
@@ -158,6 +160,11 @@ class JetBotController:
         self.VIDEO_FPS = 20  # Nên khớp với rospy.Rate của bạn
         # Codec 'MJPG' rất phổ biến và tương thích tốt
         self.VIDEO_FOURCC = cv2.VideoWriter_fourcc(*'MJPG')
+        
+        # Parameters cho LINE_VALIDATION state
+        self.LINE_VALIDATION_TIMEOUT = 2.0  # Thời gian tối đa để validate line position
+        self.LINE_CENTER_TOLERANCE = 0.2    # Tỷ lệ cho phép line lệch khỏi center (20% width)
+        self.LINE_VALIDATION_ATTEMPTS = 8   # Số lần thử validate tối đa
 
     def initialize_hardware(self):
         try:
@@ -300,7 +307,12 @@ class JetBotController:
     
     def _set_state(self, new_state, initial=False):
         if self.current_state != new_state:
-            if not initial: rospy.loginfo(f"Chuyển trạng thái: {self.current_state.name} -> {new_state.name}")
+            if not initial: rospy.loginfo(f"Chuyển trạng thái: {self.current_state.name if self.current_state else 'None'} -> {new_state.name}")
+            
+            # Reset line validation counter khi rời khỏi LINE_VALIDATION state
+            if self.current_state == RobotState.LINE_VALIDATION and new_state != RobotState.LINE_VALIDATION:
+                self.line_validation_attempts = 0
+                
             self.current_state = new_state
             self.state_change_time = rospy.get_time()
 
@@ -364,12 +376,62 @@ class JetBotController:
                 execution_line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
 
                 if execution_line_center is not None:
+                    # Kiểm tra xem line có nằm trong khoảng hợp lệ không trước khi bám
+                    if not self._is_line_in_valid_range(self.latest_image):
+                        rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
+                        self.line_validation_attempts = 0  # Reset counter
+                        self._set_state(RobotState.LINE_VALIDATION)
+                        continue
+                    
                     # An toàn để bám line, vì chúng ta biết phía trước không có giao lộ đột ngột.
                     self.correct_course(execution_line_center)
                 else:
                     # Trường hợp hiếm: ROI xa thấy line nhưng ROI gần lại không. Dừng lại cho an toàn.
                     rospy.logwarn("Trạng thái không nhất quán: ROI xa thấy line, ROI gần không thấy. Tạm dừng an toàn.")
                     self.robot.stop()
+
+            # ===================================================================
+            # TRẠNG THÁI 1.5: KIỂM TRA VÀ XÁC THỰC VỊ TRÍ LINE (LINE_VALIDATION)
+            # ===================================================================
+            elif self.current_state == RobotState.LINE_VALIDATION:
+                if self.latest_image is None:
+                    rospy.logwarn("LINE_VALIDATION: Chờ dữ liệu camera...")
+                    self.robot.stop()
+                    rate.sleep()
+                    continue
+
+                # Kiểm tra line có nằm trong khoảng hợp lệ không
+                if self._is_line_in_valid_range(self.latest_image):
+                    rospy.loginfo("LINE_VALIDATION: Line position hợp lệ, tiếp tục bám line.")
+                    self._set_state(RobotState.DRIVING_STRAIGHT)
+                    continue
+                else:
+                    # Line không hợp lệ, thử điều chỉnh
+                    self.line_validation_attempts += 1
+                    rospy.logwarn(f"LINE_VALIDATION: Line không hợp lệ, lần thử {self.line_validation_attempts}/{self.LINE_VALIDATION_ATTEMPTS}")
+                    
+                    if self.line_validation_attempts >= self.LINE_VALIDATION_ATTEMPTS:
+                        rospy.logerr("LINE_VALIDATION: Đã thử tối đa, chuyển sang tìm kiếm line mới.")
+                        self._set_state(RobotState.REACQUIRING_LINE)
+                        continue
+                    
+                    # Thử điều chỉnh nhẹ để tìm lại line
+                    line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+                    if line_center is not None:
+                        error = line_center - (self.WIDTH / 2)
+                        if abs(error) > 0:
+                            # Điều chỉnh nhẹ về phía line
+                            adj = np.clip(error / (self.WIDTH / 2) * 0.3, -0.1, 0.1)
+                            self.robot.set_motors(self.BASE_SPEED * 0.5 + adj, self.BASE_SPEED * 0.5 - adj)
+                        else:
+                            self.robot.set_motors(self.BASE_SPEED * 0.5, self.BASE_SPEED * 0.5)
+                    else:
+                        self.robot.stop()
+                
+                # Timeout check
+                if rospy.get_time() - self.state_change_time > self.LINE_VALIDATION_TIMEOUT:
+                    rospy.logwarn("LINE_VALIDATION: Timeout, chuyển sang tìm kiếm line mới.")
+                    self._set_state(RobotState.REACQUIRING_LINE)
 
             # ===================================================================
             # TRẠNG THÁI 2: ĐANG TIẾN VÀO GIAO LỘ (APPROACHING_INTERSECTION)
@@ -527,6 +589,29 @@ class JetBotController:
             # Quan trọng: Trọng tâm bây giờ được tính toán chỉ dựa trên vạch kẻ trong khu vực trung tâm
             return int(M["m10"] / M["m00"])
         return None
+    
+    def _is_line_in_valid_range(self, image):
+        """
+        Kiểm tra xem vạch kẻ có nằm trong khoảng hợp lệ không.
+        Returns: 
+            - True nếu line nằm trong khoảng cho phép
+            - False nếu line quá lệch hoặc không tìm thấy
+        """
+        if image is None:
+            return False
+            
+        line_center = self._get_line_center(image, self.ROI_Y, self.ROI_H)
+        if line_center is None:
+            return False
+            
+        image_center = self.WIDTH / 2
+        max_deviation = self.WIDTH * self.LINE_CENTER_TOLERANCE
+        deviation = abs(line_center - image_center)
+        
+        is_valid = deviation <= max_deviation
+        
+        rospy.loginfo(f"Line validation: center={line_center}, deviation={deviation:.1f}, max_allowed={max_deviation:.1f}, valid={is_valid}")
+        return is_valid
     
     def correct_course(self, line_center_x):
         """
