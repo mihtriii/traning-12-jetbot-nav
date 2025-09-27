@@ -728,119 +728,7 @@ class JetBotController:
         
         return None
     
-    def calculate_line_angle_from_lidar(self):
-        """
-        Tính góc của line dựa trên các clusters từ LiDAR.
-        """
-        line_clusters = self.find_line_clusters_in_lidar()
-        
-        if len(line_clusters) < 1:
-            return None, "NO_CLUSTERS_FOUND"
-        
-        # Weighted average dựa trên số điểm và khoảng cách
-        angles = [cluster['center_angle'] for cluster in line_clusters]
-        distances = [cluster['distance'] for cluster in line_clusters]
-        point_counts = [cluster['point_count'] for cluster in line_clusters]
-        
-        # Tính trọng số (gần hơn và nhiều điểm hơn = trọng số cao hơn)
-        weights = []
-        for i in range(len(line_clusters)):
-            weight = point_counts[i] / (distances[i] + 0.1)
-            weights.append(weight)
-        
-        weights = np.array(weights)
-        if np.sum(weights) > 0:
-            weights = weights / np.sum(weights)  # Normalize
-            weighted_angle = np.average(angles, weights=weights)
-        else:
-            weighted_angle = np.mean(angles)
-        
-        # Đánh giá confidence
-        if len(line_clusters) >= 3:
-            confidence = "HIGH"
-        elif len(line_clusters) >= 2:
-            confidence = "MEDIUM"
-        else:
-            confidence = "LOW"
-        
-        return weighted_angle, confidence
-    
-    def analyze_and_print_line_angles(self):
-        """
-        Phân tích và in ra góc line từ camera và LiDAR.
-        """
-        current_time = rospy.get_time()
-        
-        # Chỉ phân tích mỗi interval seconds
-        if current_time - self.last_angle_analysis_time < self.angle_analysis_interval:
-            return
-        
-        self.last_angle_analysis_time = current_time
-        
-        camera_angle, camera_conf = self.calculate_line_angle_from_camera()
-        lidar_angle, lidar_conf = self.calculate_line_angle_from_lidar()
-        
-        print("\n" + "="*60)
-        print("🔍 LINE ANGLE ANALYSIS")
-        print(f"⏰ Time: {current_time:.1f}s")
-        print("="*60)
-        
-        # Camera Analysis
-        print(f"📷 CAMERA:")
-        if camera_angle is not None:
-            print(f"   • Angle: {camera_angle:+6.2f}° ({camera_conf})")
-            if camera_angle > 5:
-                print(f"   • Direction: RIGHT (line to the right)")
-            elif camera_angle < -5:
-                print(f"   • Direction: LEFT (line to the left)")
-            else:
-                print(f"   • Direction: STRAIGHT (centered)")
-        else:
-            print(f"   • Status: {camera_conf}")
-        
-        # LiDAR Analysis
-        print(f"📡 LIDAR:")
-        if lidar_angle is not None:
-            clusters = self.find_line_clusters_in_lidar()
-            print(f"   • Angle: {lidar_angle:+6.2f}° ({lidar_conf})")
-            print(f"   • Clusters: {len(clusters)} found")
-            for i, cluster in enumerate(clusters):
-                print(f"     #{i+1}: {cluster['point_count']} pts @ {cluster['center_angle']:+5.1f}°, "
-                      f"dist={cluster['distance']:.2f}m")
-        else:
-            print(f"   • Status: {lidar_conf}")
-        
-        # Comparison
-        if camera_angle is not None and lidar_angle is not None:
-            angle_diff = abs(camera_angle - lidar_angle)
-            print(f"🔄 COMPARISON:")
-            print(f"   • Difference: {angle_diff:.2f}°")
-            
-            if angle_diff < 3:
-                agreement = "EXCELLENT"
-            elif angle_diff < 8:
-                agreement = "GOOD"
-            elif angle_diff < 15:
-                agreement = "FAIR"
-            else:
-                agreement = "POOR"
-            
-            print(f"   • Agreement: {agreement}")
-            
-            # Combined recommendation
-            if camera_conf == "HIGH" and lidar_conf == "HIGH":
-                combined_angle = (camera_angle + lidar_angle) / 2
-                print(f"   • Combined: {combined_angle:+6.2f}° (averaged)")
-            elif camera_conf == "HIGH":
-                print(f"   • Recommend: Use Camera ({camera_angle:+6.2f}°)")
-            elif lidar_conf == "HIGH":
-                print(f"   • Recommend: Use LiDAR ({lidar_angle:+6.2f}°)")
-            else:
-                combined_angle = (camera_angle + lidar_angle) / 2
-                print(f"   • Combined: {combined_angle:+6.2f}° (with caution)")
-        
-        print("="*60 + "\n")
-    
+   
     def detect_camera_intersection(self):
         """
         Phát hiện giao lộ từ camera bằng cách tìm đường ngang vuông góc với line hiện tại.
@@ -959,7 +847,7 @@ class JetBotController:
         if not self.camera_intersection_detected and not self.waiting_for_lidar_confirmation:
             camera_detected, camera_conf, cross_center = self.detect_camera_intersection()
             
-            if camera_detected:
+            if camera_detected: # Khi detect được giao lộ bằng camera di chuyển thêm 1 đoạn để tránh nhiễu
                 rospy.loginfo(f"📷 CAMERA: Intersection detected! Confidence: {camera_conf}")
                 rospy.loginfo(f"📷 Cross line center: {cross_center}, Main line center: {self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)}")
                 
@@ -970,6 +858,7 @@ class JetBotController:
                     self.waiting_for_lidar_confirmation = True
                     rospy.loginfo("📷 CAMERA: Waiting for LiDAR confirmation...")
                     return False  # Chưa confirm, chỉ mới detect
+                time.sleep(0.5)  # Cho robot di chuyển thêm một chút để tránh nhiễu
         
         # Bước 2: Chờ LiDAR confirmation
         if self.waiting_for_lidar_confirmation:
