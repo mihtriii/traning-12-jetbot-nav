@@ -135,13 +135,13 @@ class JetBotController:
 
     def setup_parameters(self):
         self.WIDTH, self.HEIGHT = 300, 300
-        self.BASE_SPEED = 0.16
+        self.BASE_SPEED = 0.2
         self.TURN_SPEED = 0.2
         self.TURN_DURATION_90_DEG = 0.8
         self.ROI_Y = int(self.HEIGHT * 0.85)
         self.ROI_H = int(self.HEIGHT * 0.15)
         self.ROI_CENTER_WIDTH_PERCENT = 0.5
-        self.LOOKAHEAD_ROI_Y = int(self.HEIGHT * 0.5) # Vị trí Y cao hơn
+        self.LOOKAHEAD_ROI_Y = int(self.HEIGHT * 0.7) # Vị trí Y cao hơn
         self.LOOKAHEAD_ROI_H = int(self.HEIGHT * 0.15) # Chiều cao tương tự
 
         self.CORRECTION_GAIN = 0.5
@@ -900,7 +900,7 @@ class JetBotController:
             confidence_level = "MEDIUM"
         
         # Additional confidence boost for very horizontal lines
-        if abs(best_candidate.get('line_angle', 0)) < 10:
+        if abs(best_candidate.get('line_angle', 0)) < 12:
             if confidence_level == "MEDIUM":
                 confidence_level = "HIGH"
             elif confidence_level == "LOW":
