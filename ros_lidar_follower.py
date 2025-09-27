@@ -848,7 +848,7 @@ class JetBotController:
             if camera_detected: # Khi detect được giao lộ bằng camera di chuyển thêm 1 đoạn để tránh nhiễu
                 rospy.loginfo(f"📷 CAMERA: Intersection detected! Confidence: {camera_conf}")
                 rospy.loginfo(f"📷 Cross line center: {cross_center}, Main line center: {self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)}")
-                
+                print(f"📷 Cross line center: {cross_center}, Main line center: {self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)}")
                 # Chỉ trigger nếu confidence đủ cao
                 if camera_conf in ["HIGH", "MEDIUM"]:
                     self.camera_intersection_detected = True
