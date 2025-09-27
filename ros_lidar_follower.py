@@ -63,7 +63,7 @@ class JetBotController:
         self.camera_intersection_detected = False
         self.camera_detection_time = 0
         self.waiting_for_lidar_confirmation = False
-        self.lidar_confirmation_timeout = 4  # 3 seconds to wait for LiDAR
+        self.lidar_confirmation_timeout = 4.0  # 4 seconds to wait for LiDAR
         
         rospy.Subscriber('/scan', LaserScan, self.detector.callback)
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
@@ -900,7 +900,7 @@ class JetBotController:
             confidence_level = "MEDIUM"
         
         # Additional confidence boost for very horizontal lines
-        if abs(best_candidate.get('line_angle', 0)) < 12:
+        if abs(best_candidate.get('line_angle', 0)) < 15:
             if confidence_level == "MEDIUM":
                 confidence_level = "HIGH"
             elif confidence_level == "LOW":
