@@ -131,7 +131,135 @@ class JetBotController:
                 # Vẽ một đường thẳng đứng màu đỏ tại vị trí trọng tâm
                 cv2.line(debug_frame, (line_center, self.ROI_Y), (line_center, self.ROI_Y + self.ROI_H), (0, 0, 255), 2)
 
+        # 4. Vẽ thông tin Flag Detection
+        if self.FLAG_DETECTION_ENABLED:
+            y_offset = 60
+            flag_status = "WAITING" if self.WAITING_FOR_FLAG_REMOVAL else "MONITORING"
+            flag_color = (0, 255, 255) if self.WAITING_FOR_FLAG_REMOVAL else (0, 255, 0)  # Yellow if waiting, Green if monitoring
+            flag_text = f"Flag: {flag_status}"
+            cv2.putText(debug_frame, flag_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, flag_color, 1, cv2.LINE_AA)
+            
+            # Vẽ counters
+            y_offset += 15
+            counter_text = f"Det:{self.flag_detected_count} Clear:{self.flag_clear_count}"
+            cv2.putText(debug_frame, counter_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
+
         return debug_frame
+
+    def detect_flag_covering_camera(self, image):
+        """
+        Phát hiện cờ che camera bằng cách kiểm tra độ tối của ảnh.
+        Returns: True nếu camera bị che bởi cờ
+        """
+        if image is None:
+            return False
+            
+        # Chuyển ảnh sang grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Tính độ sáng trung bình
+        mean_brightness = np.mean(gray)
+        
+        # Đếm số pixel tối
+        dark_pixels = np.sum(gray < self.FLAG_DARKNESS_THRESHOLD)
+        total_pixels = gray.shape[0] * gray.shape[1]
+        dark_ratio = dark_pixels / total_pixels
+        
+        # Xác định có cờ che không
+        is_covered = (mean_brightness < self.FLAG_DARKNESS_THRESHOLD and 
+                     dark_ratio > self.FLAG_COVERAGE_RATIO_THRESHOLD)
+        
+        if self.FLAG_DETECTION_ENABLED:
+            rospy.loginfo_throttle(1, f"Flag Detection: brightness={mean_brightness:.1f}, "
+                                    f"dark_ratio={dark_ratio:.3f}, covered={is_covered}")
+        
+        return is_covered
+
+    def check_flag_status_and_wait(self):
+        """
+        Kiểm tra trạng thái cờ và xử lý logic chờ đợi.
+        Returns: True nếu robot được phép tiếp tục, False nếu cần dừng
+        """
+        if not self.FLAG_DETECTION_ENABLED:
+            return True  # Nếu tắt tính năng thì luôn cho phép di chuyển
+            
+        if self.latest_image is None:
+            return False  # Không có ảnh thì dừng an toàn
+        
+        flag_covering = self.detect_flag_covering_camera(self.latest_image)
+        
+        # Logic phát hiện cờ che
+        if flag_covering:
+            self.flag_detected_count += 1
+            self.flag_clear_count = 0
+            
+            if self.flag_detected_count >= self.FLAG_CHECK_FRAMES:
+                if not self.WAITING_FOR_FLAG_REMOVAL:
+                    rospy.logwarn("🚩 CỜ PHÁT HIỆN! Robot dừng lại và chờ cờ được phất...")
+                    self.WAITING_FOR_FLAG_REMOVAL = True
+                
+                rospy.logwarn_throttle(2, "⏳ Đang chờ cờ được phất...")
+                return False  # Dừng robot
+        else:
+            # Không có cờ che
+            self.flag_clear_count += 1
+            self.flag_detected_count = 0
+            
+            if self.WAITING_FOR_FLAG_REMOVAL:
+                if self.flag_clear_count >= self.FLAG_CLEAR_FRAMES:
+                    # Kiểm tra xem có detect được line không trước khi tiếp tục
+                    line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+                    if line_center is not None:
+                        rospy.loginfo("✅ CỜ ĐÃ ĐƯỢC PHẤT & LINE DETECTED! Robot tiếp tục hoạt động...")
+                        self.WAITING_FOR_FLAG_REMOVAL = False
+                        return True
+                    else:
+                        rospy.logwarn_throttle(2, "⏳ Cờ đã phất nhưng chưa detect được line, tiếp tục chờ...")
+                        return False
+                else:
+                    rospy.loginfo_throttle(2, f"⏳ Cờ đã phất, đang xác nhận... ({self.flag_clear_count}/{self.FLAG_CLEAR_FRAMES})")
+                    return False
+            else:
+                return True  # Không có cờ và không trong trạng thái chờ
+        
+        return True
+
+    def enable_flag_detection(self):
+        """
+        🚩 Bật tính năng phát hiện cờ che camera
+        """
+        self.FLAG_DETECTION_ENABLED = True
+        rospy.loginfo("🚩 FLAG DETECTION ENABLED: Tính năng phát hiện cờ đã được bật")
+        
+    def disable_flag_detection(self):
+        """
+        🚫 Tắt tính năng phát hiện cờ che camera
+        """
+        self.FLAG_DETECTION_ENABLED = False
+        self.WAITING_FOR_FLAG_REMOVAL = False  # Reset trạng thái chờ
+        self.flag_detected_count = 0
+        self.flag_clear_count = 0
+        rospy.loginfo("🚫 FLAG DETECTION DISABLED: Tính năng phát hiện cờ đã được tắt")
+        
+    def reset_flag_detection(self):
+        """
+        🔄 Reset trạng thái phát hiện cờ
+        """
+        self.WAITING_FOR_FLAG_REMOVAL = False
+        self.flag_detected_count = 0
+        self.flag_clear_count = 0
+        rospy.loginfo("🔄 FLAG DETECTION RESET: Đã reset trạng thái phát hiện cờ")
+        
+    def get_flag_status(self):
+        """
+        📊 Lấy trạng thái hiện tại của flag detection
+        """
+        return {
+            'enabled': self.FLAG_DETECTION_ENABLED,
+            'waiting_for_removal': self.WAITING_FOR_FLAG_REMOVAL,
+            'detected_count': self.flag_detected_count,
+            'clear_count': self.flag_clear_count
+        }
 
     def setup_parameters(self):
         self.WIDTH, self.HEIGHT = 300, 300
@@ -153,6 +281,16 @@ class JetBotController:
         self.LINE_REACQUIRE_TIMEOUT = 3.0
         self.SCAN_PIXEL_THRESHOLD = 100
         self.initialize_motion_flags = True
+        
+        # Parameters cho Flag Detection (Phát hiện cờ che camera)
+        self.FLAG_DETECTION_ENABLED = True          # Bật/tắt tính năng phát hiện cờ
+        self.FLAG_DARKNESS_THRESHOLD = 30           # Ngưỡng độ tối để detect cờ che
+        self.FLAG_COVERAGE_RATIO_THRESHOLD = 0.7    # Tỷ lệ % camera bị che để xác định có cờ
+        self.FLAG_CHECK_FRAMES = 5                  # Số frame liên tiếp để xác nhận có cờ
+        self.FLAG_CLEAR_FRAMES = 3                  # Số frame liên tiếp để xác nhận cờ đã được phất
+        self.WAITING_FOR_FLAG_REMOVAL = False       # Trạng thái đang chờ cờ được phất
+        self.flag_detected_count = 0                # Counter cho flag detection
+        self.flag_clear_count = 0                   # Counter cho flag clear detection
         self.YOLO_MODEL_PATH = "models/best.onnx"
         self.YOLO_CONF_THRESHOLD = 0.6
         self.YOLO_INPUT_SIZE = (640, 640)
@@ -363,6 +501,14 @@ class JetBotController:
                     rate.sleep()
                     continue
 
+                # --- BƯỚC 0: KIỂM TRA CỜ CHE CAMERA ---
+                # Kiểm tra trước tất cả các bước khác
+                if not self.check_flag_status_and_wait():
+                    rospy.logwarn_throttle(3, "🚩 Robot dừng do cờ che camera hoặc chờ phất cờ...")
+                    self.robot.stop()
+                    rate.sleep()
+                    continue
+
                 # --- BƯỚC 1: KIỂM TRA GIAO LỘ VỚI CAMERA-LIDAR CONFIRMATION ---
                 # Camera detect trước, LiDAR confirm sau để tránh nhiễu
                 if self.check_camera_lidar_intersection():
@@ -400,9 +546,7 @@ class JetBotController:
                 if execution_line_center is not None:
                     # Kiểm tra xem line có nằm trong khoảng hợp lệ không trước khi bám
                     if not self._is_line_in_valid_range(self.latest_image):
-                        if self.initialize_motion_flags == True:
-                            print("Khởi tạo cờ chuyển động, bỏ qua lỗi line position ban đầu.")
-                            continue
+
                         rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
                         self.line_validation_attempts = 0  # Reset counter
                         
@@ -410,7 +554,7 @@ class JetBotController:
                         continue
                     
                     # An toàn để bám line, vì chúng ta biết phía trước không có giao lộ đột ngột.
-                    self.initialize_motion_flags = False
+
                     self.correct_course(execution_line_center)
                     
                     # Phân tích và in góc line (nếu được bật)
@@ -425,6 +569,13 @@ class JetBotController:
             elif self.current_state == RobotState.LINE_VALIDATION:
                 if self.latest_image is None:
                     rospy.logwarn("LINE_VALIDATION: Chờ dữ liệu camera...")
+                    self.robot.stop()
+                    rate.sleep()
+                    continue
+
+                # Kiểm tra cờ che camera trước khi validation
+                if not self.check_flag_status_and_wait():
+                    rospy.logwarn_throttle(3, "🚩 LINE_VALIDATION: Dừng do cờ che camera...")
                     self.robot.stop()
                     rate.sleep()
                     continue
