@@ -401,6 +401,7 @@ class JetBotController:
                     # Kiểm tra xem line có nằm trong khoảng hợp lệ không trước khi bám
                     if not self._is_line_in_valid_range(self.latest_image):
                         if self.initialize_motion_flags == True:
+                            print("Khởi tạo cờ chuyển động, bỏ qua lỗi line position ban đầu.")
                             continue
                         rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
                         self.line_validation_attempts = 0  # Reset counter
