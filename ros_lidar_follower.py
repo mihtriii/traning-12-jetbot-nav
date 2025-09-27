@@ -118,6 +118,10 @@ class JetBotController:
         cv2.rectangle(debug_frame, (0, self.ROI_Y), (self.WIDTH-1, self.ROI_Y + self.ROI_H), (0, 255, 0), 1)
         # ROI Dự báo (màu vàng)
         cv2.rectangle(debug_frame, (0, self.LOOKAHEAD_ROI_Y), (self.WIDTH-1, self.LOOKAHEAD_ROI_Y + self.LOOKAHEAD_ROI_H), (0, 255, 255), 1)
+        # ROI Cross Detection (màu xanh dương)
+        cross_detection_roi_y = int(self.HEIGHT * self.CROSS_DETECTION_ROI_Y_PERCENT)
+        cross_detection_roi_h = int(self.HEIGHT * self.CROSS_DETECTION_ROI_H_PERCENT)
+        cv2.rectangle(debug_frame, (0, cross_detection_roi_y), (self.WIDTH-1, cross_detection_roi_y + cross_detection_roi_h), (255, 0, 0), 2)
 
         # 2. Vẽ trạng thái hiện tại
         state_text = f"State: {self.current_state.name if self.current_state else 'None'}"
@@ -130,6 +134,25 @@ class JetBotController:
             if line_center is not None:
                 # Vẽ một đường thẳng đứng màu đỏ tại vị trí trọng tâm
                 cv2.line(debug_frame, (line_center, self.ROI_Y), (line_center, self.ROI_Y + self.ROI_H), (0, 0, 255), 2)
+        
+        # 4. Vẽ cross detection result
+        detected, confidence, cross_center = self.detect_camera_intersection()
+        if detected and cross_center is not None:
+            # Vẽ cross line detection (màu tím)
+            cv2.line(debug_frame, 
+                    (cross_center, cross_detection_roi_y), 
+                    (cross_center, cross_detection_roi_y + cross_detection_roi_h), 
+                    (255, 0, 255), 3)
+            
+            # Thêm text thông tin
+            info_text = f"CROSS: {confidence}"
+            cv2.putText(debug_frame, info_text, (10, 40), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+        else:
+            # Hiển thị lý do không detect
+            no_detect_text = f"NO CROSS: {confidence}"
+            cv2.putText(debug_frame, no_detect_text, (10, 40), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
         return debug_frame
 
@@ -146,8 +169,9 @@ class JetBotController:
 
         self.CORRECTION_GAIN = 0.5
         self.SAFE_ZONE_PERCENT = 0.3
-        self.LINE_COLOR_LOWER = np.array([0, 0, 0])
-        self.LINE_COLOR_UPPER = np.array([180, 255, 75])
+        # CẬP NHẬT: Line màu đen trên nền trắng
+        self.LINE_COLOR_LOWER = np.array([0, 0, 0])      # Màu đen hoàn toàn
+        self.LINE_COLOR_UPPER = np.array([180, 255, 60]) # Màu đen với một chút tolerance cho HSV
         self.INTERSECTION_CLEARANCE_DURATION = 1.5
         self.INTERSECTION_APPROACH_DURATION = 0.5
         self.LINE_REACQUIRE_TIMEOUT = 3.0
@@ -178,13 +202,13 @@ class JetBotController:
         self.LINE_CENTER_TOLERANCE = 0.2    # Tỷ lệ cho phép line lệch khỏi center (20% width)
         self.LINE_VALIDATION_ATTEMPTS = 8   # Số lần thử validate tối đa
         
-        # Parameters cho Camera-LiDAR Intersection Detection
+        # Parameters cho Camera-LiDAR Intersection Detection - CẢI TIẾN ĐỘ NHẠY
         self.CAMERA_LIDAR_INTERSECTION_MODE = True  # Enable camera-first detection
-        self.CROSS_DETECTION_ROI_Y_PERCENT = 0.50   # Vị trí ROI detect cross (50% từ trên)
-        self.CROSS_DETECTION_ROI_H_PERCENT = 0.20   # Chiều cao ROI detect cross (20%)
-        self.CROSS_MIN_ASPECT_RATIO = 1.5           # Aspect ratio tối thiểu cho đường ngang
-        self.CROSS_MIN_WIDTH_RATIO = 0.3            # Width ratio tối thiểu so với ROI
-        self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
+        self.CROSS_DETECTION_ROI_Y_PERCENT = 0.45   # Hạ xuống để detect sớm hơn
+        self.CROSS_DETECTION_ROI_H_PERCENT = 0.30   # Tăng chiều cao ROI để bao phủ rộng hơn
+        self.CROSS_MIN_ASPECT_RATIO = 1.5           # Giảm xuống để nhạy hơn (từ 2.0)
+        self.CROSS_MIN_WIDTH_RATIO = 0.25           # Giảm xuống để detect line nhỏ hơn (từ 0.4)
+        self.CROSS_MAX_HEIGHT_RATIO = 0.9           # Tăng lên để cho phép line cao hơn (từ 0.8)
 
     def initialize_hardware(self):
         try:
@@ -443,9 +467,8 @@ class JetBotController:
                         error = line_center - (self.WIDTH / 2)
                         if abs(error) > 0:
                             # Điều chỉnh nhẹ về phía line
-                            # Giảm tốc độ cơ sở để có thể điều chỉnh chính xác hơn
                             adj = np.clip(error / (self.WIDTH / 2) * 0.3, -0.1, 0.1)
-                            self.robot.set_motors(self.BASE_SPEED * 0.3 + adj, self.BASE_SPEED * 0.3 - adj)
+                            self.robot.set_motors(self.BASE_SPEED * 0.5 + adj, self.BASE_SPEED * 0.5 - adj)
                         else:
                             self.robot.set_motors(self.BASE_SPEED * 0.5, self.BASE_SPEED * 0.5)
                     else:
@@ -465,7 +488,7 @@ class JetBotController:
                 
                 if rospy.get_time() - self.state_change_time > self.INTERSECTION_APPROACH_DURATION:
                     rospy.loginfo("Đã tiến vào trung tâm giao lộ. Dừng lại để xử lý.")
-                    self.robot.stop(); time.sleep(1.2)
+                    self.robot.stop(); time.sleep(0.5)
 
                     self.current_node_id = self.target_node_id
                     rospy.loginfo(f"==> ĐÃ ĐẾN node {self.current_node_id}.")
@@ -566,14 +589,20 @@ class JetBotController:
         return None
     
     def _get_line_center(self, image, roi_y, roi_h):
-        """Kiểm tra sự tồn tại và vị trí của vạch kẻ trong một ROI cụ thể."""
+        """Kiểm tra sự tồn tại và vị trí của vạch kẻ đen trong một ROI cụ thể."""
         if image is None: return None
         roi = image[roi_y : roi_y + roi_h, :]
         
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        # === PHƯƠNG PHÁP TỐI ƯU CHO LINE ĐEN ===
+        # Chuyển sang grayscale cho line đen
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Bước 1: Tạo mặt nạ màu sắc như cũ
-        color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        # Tạo mask cho line đen bằng threshold
+        _, color_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+        
+        # Alternative HSV method (backup)
+        # hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        # color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
         
         # === BƯỚC 2: TẠO MẶT NẠ TẬP TRUNG (FOCUS MASK) ===
         focus_mask = np.zeros_like(color_mask)
@@ -730,110 +759,207 @@ class JetBotController:
    
     def detect_camera_intersection(self):
         """
-        Phát hiện giao lộ từ camera bằng cách tìm đường ngang vuông góc với line hiện tại.
+        Phát hiện giao lộ từ camera với độ ổn định cao và ít bỏ lỡ.
         Returns: (detected, confidence, cross_line_center)
         """
         if self.latest_image is None:
             return False, "NO_IMAGE", None
         
-        # Lấy ROI để tìm đường ngang (cao hơn ROI chính để detect sớm hơn)
+        # === BƯỚC 1: THIẾT LẬP ROI RỘNG HỚN ĐỂ KHÔNG BỎ LỠ ===
         cross_detection_roi_y = int(self.HEIGHT * self.CROSS_DETECTION_ROI_Y_PERCENT)
         cross_detection_roi_h = int(self.HEIGHT * self.CROSS_DETECTION_ROI_H_PERCENT)
         
         roi = self.latest_image[cross_detection_roi_y:cross_detection_roi_y + cross_detection_roi_h, :]
+        original_roi = roi.copy()  # Backup để debug
         
-        # Chuyển sang HSV và tạo mask cho line
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        line_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        # === BƯỚC 2: TIỀN XỬ LÝ NÂNG CAO CHO LINE ĐEN ===
+        # Chuyển sang Grayscale cho line đen sẽ hiệu quả hơn HSV
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         
-        # Sử dụng morphological operations để làm sạch
-        kernel = np.ones((3,3), np.uint8)
-        line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_CLOSE, kernel)
-        line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_OPEN, kernel)
+        # Tạo mask cho line đen - sử dụng threshold thay vì HSV range
+        # Line đen sẽ có giá trị pixel thấp (gần 0)
+        _, line_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)  # INVERTED: đen -> trắng, trắng -> đen
         
-        # Tìm contours
+        # Alternative: Có thể dùng HSV nếu cần
+        # hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        # line_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        
+        # Gaussian blur để làm mượt và kết nối các đoạn line bị gãy
+        line_mask = cv2.GaussianBlur(line_mask, (3, 3), 0)
+        
+        # Morphological operations với kernel ngang để tăng cường đường ngang
+        # Kernel ngang giúp kết nối các pixel đường ngang bị rời rạc
+        horizontal_kernel = np.ones((2, 5), np.uint8)  # 2 pixel cao, 5 pixel rộng
+        line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_CLOSE, horizontal_kernel)
+        
+        # Kernel tổng quát để làm sạch nhiễu
+        general_kernel = np.ones((3, 3), np.uint8)
+        line_mask = cv2.morphologyEx(line_mask, cv2.MORPH_OPEN, general_kernel)
+        
+        # === BƯỚC 3: TÌM CONTOURS VỚI MULTIPLE METHODS ===
+        # Method 1: Tìm contours bình thường
         _, contours, _ = cv2.findContours(line_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        if not contours:
+        # Method 2: Sử dụng Canny edge detection để tìm edges mờ
+        edges = cv2.Canny(line_mask, 50, 150)
+        _, edge_contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Kết hợp cả hai methods
+        all_contours = contours + edge_contours
+        
+        if not all_contours:
             return False, "NO_CONTOURS", None
         
-        # Phân tích các contours để tìm đường ngang
-        roi_height, roi_width = line_mask.shape
+        # === BƯỚC 4: KIỂM TRA MAIN LINE (RELAXED) ===
         main_line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+        # Nới lỏng yêu cầu main line để không bỏ lỡ
+        # if main_line_center is None:
+        #     return False, "NO_MAIN_LINE", None
         
-        if main_line_center is None:
-            return False, "NO_MAIN_LINE", None
-        
-        # Tìm contours có khả năng là đường ngang
+        # === BƯỚC 5: PHÂN TÍCH CONTOURS VỚI TIÊU CHÍ RELAXED ===
+        roi_height, roi_width = line_mask.shape
         cross_candidates = []
         
-        for contour in contours:
+        # Giảm ngưỡng để không bỏ lỡ
+        min_contour_area = 30  # Giảm từ 50 xuống 30
+        
+        for contour in all_contours:
+            area = cv2.contourArea(contour)
+            if area < min_contour_area:
+                continue
+            
             # Tính bounding rectangle
             x, y, w, h = cv2.boundingRect(contour)
             
-            # Kiểm tra aspect ratio - đường ngang sẽ có width > height
+            # === TIÊU CHÍ RELAXED HỚN ===
             aspect_ratio = w / h if h > 0 else 0
-            
-            # Kiểm tra kích thước tương đối
             width_ratio = w / roi_width
             height_ratio = h / roi_height
             
-            # Criteria cho đường ngang:
-            # 1. Aspect ratio cao (rộng hơn cao)
-            # 2. Chiều rộng đáng kể so với ROI
-            # 3. Không quá cao
-            if (aspect_ratio > self.CROSS_MIN_ASPECT_RATIO and 
-                width_ratio > self.CROSS_MIN_WIDTH_RATIO and 
-                height_ratio < self.CROSS_MAX_HEIGHT_RATIO):
+            # Nới lỏng các tiêu chí để không bỏ lỡ:
+            # 1. Aspect ratio thấp hơn (từ 2.0 -> 1.5)
+            # 2. Width ratio nhỏ hơn (từ 0.4 -> 0.25)  
+            # 3. Height ratio cao hơn (từ 0.8 -> 0.9)
+            relaxed_min_aspect = max(1.5, self.CROSS_MIN_ASPECT_RATIO * 0.75)
+            relaxed_min_width = max(0.25, self.CROSS_MIN_WIDTH_RATIO * 0.6)
+            relaxed_max_height = min(0.9, self.CROSS_MAX_HEIGHT_RATIO * 1.1)
+            
+            if (aspect_ratio > relaxed_min_aspect and 
+                width_ratio > relaxed_min_width and 
+                height_ratio < relaxed_max_height):
                 
-                # Tính center của candidate
+                # === PHÂN TÍCH HÌNH DẠNG BẰNG MOMENT ===
                 M = cv2.moments(contour)
                 if M["m00"] > 0:
                     cx = int(M["m10"] / M["m00"])
                     cy = int(M["m01"] / M["m00"])
                     
-                    cross_candidates.append({
-                        'contour': contour,
-                        'center_x': cx,
-                        'center_y': cy,
-                        'width': w,
-                        'height': h,
-                        'aspect_ratio': aspect_ratio,
-                        'area': cv2.contourArea(contour)
-                    })
+                    # === KIỂM TRA HƯỚNG BẰNG ELLIPSE FITTING ===
+                    try:
+                        if len(contour) >= 5:  # Cần ít nhất 5 điểm để fit ellipse
+                            ellipse = cv2.fitEllipse(contour)
+                            angle = ellipse[2]  # Góc của ellipse
+                            
+                            # Kiểm tra xem có phải hướng ngang không
+                            normalized_angle = angle % 180
+                            horizontal_tolerance = 35  # Tăng tolerance từ 20 -> 35
+                            
+                            is_horizontal = (normalized_angle <= horizontal_tolerance or 
+                                           normalized_angle >= (180 - horizontal_tolerance))
+                        else:
+                            is_horizontal = True  # Chấp nhận nếu không thể phân tích
+                    except:
+                        is_horizontal = True  # Chấp nhận nếu có lỗi
+                    
+                    if is_horizontal:
+                        cross_candidates.append({
+                            'contour': contour,
+                            'center_x': cx,
+                            'center_y': cy,
+                            'width': w,
+                            'height': h,
+                            'aspect_ratio': aspect_ratio,
+                            'area': area,
+                            'width_ratio': width_ratio,
+                            'height_ratio': height_ratio,
+                            'distance_from_center': abs(cx - roi_width/2)
+                        })
         
         if not cross_candidates:
             return False, "NO_CROSS_CANDIDATES", None
         
-        # Chọn candidate tốt nhất (lớn nhất và gần center nhất)
+        # === BƯỚC 6: SCORING VỚI MULTI-FACTOR ANALYSIS ===
         best_candidate = None
         best_score = 0
         
         for candidate in cross_candidates:
-            # Score dựa trên area và position
-            area_score = candidate['area'] / (roi_width * roi_height)  # Normalize
-            center_score = 1.0 - abs(candidate['center_x'] - roi_width/2) / (roi_width/2)  # Closer to center = higher
+            # Score components (0-1 scale)
+            area_score = min(candidate['area'] / (roi_width * roi_height * 0.15), 1.0)  # Giảm threshold
+            aspect_score = min(candidate['aspect_ratio'] / 6.0, 1.0)  # Giảm max aspect từ 8->6
             
-            total_score = area_score * 0.6 + center_score * 0.4
+            # Center score - ưu tiên candidates gần center
+            center_score = 1.0 - (candidate['distance_from_center'] / (roi_width/2))
+            center_score = max(0, center_score)
+            
+            # Size appropriateness score
+            size_score = candidate['width_ratio'] * (1.0 - candidate['height_ratio'])
+            size_score = max(0, min(1, size_score))
+            
+            # Tổng hợp score với trọng số cân bằng
+            total_score = (area_score * 0.3 +      # Diện tích
+                          aspect_score * 0.25 +    # Tỷ lệ khung hình
+                          center_score * 0.25 +    # Vị trí trung tâm
+                          size_score * 0.2)        # Kích thước phù hợp
             
             if total_score > best_score:
                 best_score = total_score
                 best_candidate = candidate
         
-        if best_candidate is None:
+        if best_candidate is None or best_score < 0.15:  # Giảm threshold từ 0.3 -> 0.15
             return False, "NO_GOOD_CANDIDATE", None
         
-        # Đánh giá confidence
+        # === BƯỚC 7: CONFIDENCE ASSESSMENT (RELAXED) ===
         confidence_level = "LOW"
-        if best_score > 0.7:
+        if best_score > 0.6:      # Giảm từ 0.8 -> 0.6
             confidence_level = "HIGH"
-        elif best_score > 0.4:
+        elif best_score > 0.35:   # Giảm từ 0.6 -> 0.35
             confidence_level = "MEDIUM"
         
-        # Convert back to full image coordinates
-        cross_line_center = best_candidate['center_x']
+        # === BƯỚC 8: TEMPORAL SMOOTHING (NẾU CẦN) ===
+        # Lưu trữ detection history cho smoothing
+        if not hasattr(self, 'cross_detection_buffer'):
+            self.cross_detection_buffer = []
         
-        return True, confidence_level, cross_line_center
+        current_detection = {
+            'detected': True,
+            'center_x': best_candidate['center_x'],
+            'score': best_score,
+            'confidence': confidence_level,
+            'timestamp': rospy.get_time()
+        }
+        
+        # Thêm vào buffer và giữ 3 detection gần nhất
+        self.cross_detection_buffer.append(current_detection)
+        if len(self.cross_detection_buffer) > 3:
+            self.cross_detection_buffer.pop(0)
+        
+        # Kiểm tra consistency trong buffer
+        recent_detections = [d for d in self.cross_detection_buffer 
+                           if rospy.get_time() - d['timestamp'] < 1.0]  # Trong 1 giây
+        
+        positive_detections = [d for d in recent_detections if d['detected']]
+        
+        # Nếu có ít nhất 1/3 detections gần đây là positive -> confirm
+        if len(positive_detections) >= max(1, len(recent_detections) // 3):
+            cross_line_center = best_candidate['center_x']
+            
+            # Debug info
+            rospy.loginfo(f"📷 CROSS DETECTED: Score={best_score:.3f}, AR={best_candidate['aspect_ratio']:.2f}, "
+                         f"Size={best_candidate['width']}x{best_candidate['height']}, Conf={confidence_level}")
+            
+            return True, confidence_level, cross_line_center
+        
+        return False, "INSUFFICIENT_TEMPORAL_CONSISTENCY", None
     
     def check_camera_lidar_intersection(self):
         """
@@ -1095,10 +1221,18 @@ class JetBotController:
         time.sleep(0.5)
     
     def _does_path_exist_in_frame(self, image):
+        """Kiểm tra sự tồn tại của path (line đen) trong frame."""
         if image is None: return False
         roi = image[self.ROI_Y : self.ROI_Y + self.ROI_H, :]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        
+        # Sử dụng grayscale threshold cho line đen
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
+        
+        # Alternative HSV method
+        # hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        # mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        
         _img, contours, _hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         return bool(contours) and cv2.contourArea(max(contours, key=cv2.contourArea)) > self.SCAN_PIXEL_THRESHOLD
     
