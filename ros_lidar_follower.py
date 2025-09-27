@@ -389,6 +389,7 @@ class JetBotController:
                     rospy.logwarn("SỰ KIỆN (Dự báo): Vạch kẻ đường biến mất ở phía xa. Chuẩn bị vào giao lộ.")
                     # Hành động phòng ngừa: chuyển sang trạng thái đi thẳng vào giao lộ.
                     self._set_state(RobotState.APPROACHING_INTERSECTION)
+                    time.sleep(0.3)
                     continue # Bắt đầu vòng lặp mới với trạng thái mới
 
                 # --- BƯỚC 3: BÁM LINE BÌNH THƯỜNG (NẾU PHÍA TRƯỚC AN TOÀN) ---
