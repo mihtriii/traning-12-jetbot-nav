@@ -565,36 +565,22 @@ class JetBotController:
         return None
     
     def _get_line_center(self, image, roi_y, roi_h):
-        """Kiểm tra sự tồn tại và vị trí của vạch kẻ trong một ROI cụ thể với improved detection và anti-glare."""
+        """Kiểm tra sự tồn tại và vị trí của vạch kẻ trong một ROI cụ thể với improved detection."""
         if image is None: return None
         roi = image[roi_y : roi_y + roi_h, :]
         
-        # === ANTI-GLARE PREPROCESSING ===
-        # Apply bilateral filter to reduce noise while preserving edges
-        roi_filtered = cv2.bilateralFilter(roi, 9, 75, 75)
-        
-        # Apply histogram equalization to reduce lighting variations
-        roi_yuv = cv2.cvtColor(roi_filtered, cv2.COLOR_BGR2YUV)
-        roi_yuv[:,:,0] = cv2.equalizeHist(roi_yuv[:,:,0])  # Equalize Y channel
-        roi_eq = cv2.cvtColor(roi_yuv, cv2.COLOR_YUV2BGR)
-        
         # === BƯỚC 1: HSV COLOR-BASED DETECTION ===
-        hsv = cv2.cvtColor(roi_eq, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
         
         # === BƯỚC 2: GRAYSCALE THRESHOLD DETECTION (BACKUP METHOD) ===
-        gray = cv2.cvtColor(roi_eq, cv2.COLOR_BGR2GRAY)
-        # Apply Gaussian blur to reduce glare noise
-        gray_blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         # Use THRESH_BINARY_INV to get white pixels for dark lines
-        _, thresh_mask = cv2.threshold(gray_blurred, 60, 255, cv2.THRESH_BINARY_INV)
+        _, thresh_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
         
         # === BƯỚC 3: COMBINE BOTH METHODS ===
         # Use logical OR to combine both detection methods
         combined_mask = cv2.bitwise_or(color_mask, thresh_mask)
-        
-        # Additional noise reduction on combined mask
-        combined_mask = cv2.medianBlur(combined_mask, 3)
         
         # === BƯỚC 4: TẠO MẶT NẠ TẬP TRUNG (FOCUS MASK) ===
         focus_mask = np.zeros_like(combined_mask)
@@ -611,48 +597,24 @@ class JetBotController:
         # Chỉ giữ lại những pixel trắng nào xuất hiện ở cả detection mask và focus mask
         final_mask = cv2.bitwise_and(combined_mask, focus_mask)
 
+        # (Tùy chọn) Hiển thị mask để debug
+        # cv2.imshow("HSV Mask", color_mask)
+        # cv2.imshow("Grayscale Mask", thresh_mask)
+        # cv2.imshow("Combined Mask", combined_mask)
+        # cv2.imshow("Focus Mask", focus_mask)
+        # cv2.imshow("Final Mask", final_mask)
+        # cv2.waitKey(1)
+
         # Tìm contours trên mặt nạ cuối cùng đã được lọc
         _, contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
             return None
             
-        # === CONTOUR QUALITY FILTERING (ANTI-GLARE) ===
-        valid_contours = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.SCAN_PIXEL_THRESHOLD:
-                continue
-                
-            # Calculate contour quality metrics to filter out glare artifacts
-            perimeter = cv2.arcLength(contour, True)
-            if perimeter == 0:
-                continue
-                
-            # Solidity: ratio of contour area to convex hull area
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            solidity = area / hull_area if hull_area > 0 else 0
-            
-            # Aspect ratio check
-            x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = w / h if h > 0 else 0
-            
-            # Filter criteria to remove glare artifacts:
-            # 1. Solidity should be reasonable (not too irregular)
-            # 2. Not extremely thin or wide (glare tends to be irregular)
-            # 3. Decent area-to-perimeter ratio
-            area_to_perimeter = area / (perimeter * perimeter) if perimeter > 0 else 0
-            
-            if (solidity > 0.3 and solidity < 0.95 and  # Reasonable shape
-                aspect_ratio > 0.1 and aspect_ratio < 10 and  # Not extremely thin/wide
-                area_to_perimeter > 0.001):  # Reasonable compactness
-                valid_contours.append(contour)
+        c = max(contours, key=cv2.contourArea)
         
-        if not valid_contours:
+        if cv2.contourArea(c) < self.SCAN_PIXEL_THRESHOLD:
             return None
-            
-        c = max(valid_contours, key=cv2.contourArea)
 
         M = cv2.moments(c)
         if M["m00"] > 0:
@@ -777,8 +739,8 @@ class JetBotController:
    
     def detect_camera_intersection(self):
         """
-        Enhanced intersection detection with anti-glare processing for horizontal black lines.
-        Uses multiple detection methods and advanced noise reduction.
+        Enhanced intersection detection with improved sensitivity for horizontal black lines.
+        Uses multiple detection methods and morphological operations.
         """
         if self.latest_image is None:
             return False, "NO_IMAGE", None
@@ -789,36 +751,23 @@ class JetBotController:
         
         roi = self.latest_image[cross_detection_roi_y:cross_detection_roi_y + cross_detection_roi_h, :]
         
-        # === ANTI-GLARE PREPROCESSING ===
-        # Step 1: Bilateral filter to reduce noise while preserving edges
-        roi_filtered = cv2.bilateralFilter(roi, 9, 75, 75)
-        
-        # Step 2: Histogram equalization to normalize lighting
-        roi_yuv = cv2.cvtColor(roi_filtered, cv2.COLOR_BGR2YUV)
-        roi_yuv[:,:,0] = cv2.equalizeHist(roi_yuv[:,:,0])  # Equalize Y channel only
-        roi_normalized = cv2.cvtColor(roi_yuv, cv2.COLOR_YUV2BGR)
-        
         # === IMPROVED MULTI-METHOD DETECTION ===
         
-        # Method 1: HSV-based detection (on normalized image)
-        hsv = cv2.cvtColor(roi_normalized, cv2.COLOR_BGR2HSV)
+        # Method 1: HSV-based detection
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         hsv_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
         
-        # Method 2: Grayscale threshold detection with blur
-        gray = cv2.cvtColor(roi_normalized, cv2.COLOR_BGR2GRAY)
-        gray_blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, thresh_mask = cv2.threshold(gray_blurred, 60, 255, cv2.THRESH_BINARY_INV)
+        # Method 2: Grayscale threshold detection
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        _, thresh_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
         
-        # Method 3: Adaptive threshold for varying lighting (more conservative)
-        adaptive_mask = cv2.adaptiveThreshold(gray_blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
-                                            cv2.THRESH_BINARY_INV, 11, 4)  # Higher C value to reduce noise
+        # Method 3: Adaptive threshold for varying lighting
+        adaptive_mask = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
+                                            cv2.THRESH_BINARY_INV, 11, 2)
         
         # Combine all detection methods
         combined_mask = cv2.bitwise_or(hsv_mask, thresh_mask)
         combined_mask = cv2.bitwise_or(combined_mask, adaptive_mask)
-        
-        # Additional noise reduction
-        combined_mask = cv2.medianBlur(combined_mask, 3)
         
         # === ENHANCED MORPHOLOGICAL OPERATIONS ===
         
@@ -857,7 +806,7 @@ class JetBotController:
         if main_line_center is None:
             return False, "NO_MAIN_LINE", None
         
-        # === ENHANCED CROSS CANDIDATE ANALYSIS WITH ANTI-GLARE ===
+        # === ENHANCED CROSS CANDIDATE ANALYSIS ===
         roi_height, roi_width = line_mask.shape
         cross_candidates = []
         
@@ -869,37 +818,13 @@ class JetBotController:
             height_ratio = h / roi_height
             area = cv2.contourArea(contour)
             
-            # === ANTI-GLARE CONTOUR QUALITY CHECKS ===
-            # Calculate quality metrics to filter out glare artifacts
-            perimeter = cv2.arcLength(contour, True)
-            if perimeter == 0:
-                continue
-                
-            # Solidity: ratio of contour area to convex hull area
-            hull = cv2.convexHull(contour)
-            hull_area = cv2.contourArea(hull)
-            solidity = area / hull_area if hull_area > 0 else 0
-            
-            # Extent: ratio of contour area to bounding rectangle area
-            extent = area / (w * h) if (w * h) > 0 else 0
-            
-            # Compactness: measure of how circular/compact the shape is
-            compactness = (4 * np.pi * area) / (perimeter * perimeter) if perimeter > 0 else 0
-            
-            # More relaxed criteria for better detection, but with glare filtering
+            # More relaxed criteria for better detection
             is_horizontal = aspect_ratio > self.CROSS_MIN_ASPECT_RATIO
             is_wide_enough = width_ratio > self.CROSS_MIN_WIDTH_RATIO
             is_not_too_tall = height_ratio < self.CROSS_MAX_HEIGHT_RATIO
             is_big_enough = area > 50  # Minimum area threshold
             
-            # Anti-glare quality filters
-            is_solid_enough = solidity > 0.2 and solidity < 0.95  # Not too irregular or too perfect
-            is_reasonable_extent = extent > 0.3  # Should fill reasonable portion of bounding box
-            is_not_too_spiky = compactness > 0.01  # Not extremely spiky (glare artifacts tend to be)
-            
-            if (is_horizontal and is_wide_enough and is_not_too_tall and is_big_enough and
-                is_solid_enough and is_reasonable_extent and is_not_too_spiky):
-                
+            if is_horizontal and is_wide_enough and is_not_too_tall and is_big_enough:
                 # Calculate more detailed properties
                 M = cv2.moments(contour)
                 if M["m00"] > 0:
@@ -923,10 +848,7 @@ class JetBotController:
                                 'aspect_ratio': aspect_ratio,
                                 'area': area,
                                 'width_ratio': width_ratio,
-                                'line_angle': line_angle,
-                                'solidity': solidity,
-                                'extent': extent,
-                                'compactness': compactness
+                                'line_angle': line_angle
                             })
                     else:
                         # Fallback for small contours
@@ -939,39 +861,28 @@ class JetBotController:
                             'aspect_ratio': aspect_ratio,
                             'area': area,
                             'width_ratio': width_ratio,
-                            'line_angle': 0,
-                            'solidity': solidity,
-                            'extent': extent,
-                            'compactness': compactness
+                            'line_angle': 0
                         })
         
         if not cross_candidates:
             return False, "NO_CROSS_CANDIDATES", None
         
-        # === IMPROVED CANDIDATE SCORING WITH ANTI-GLARE METRICS ===
+        # === IMPROVED CANDIDATE SCORING ===
         best_candidate = None
         best_score = 0
         
         for candidate in cross_candidates:
-            # Multi-factor scoring including quality metrics
+            # Multi-factor scoring
             area_score = min(candidate['area'] / (roi_width * roi_height), 1.0)  # Normalize and cap
             center_score = 1.0 - abs(candidate['center_x'] - roi_width/2) / (roi_width/2)
             aspect_score = min(candidate['aspect_ratio'] / 5.0, 1.0)  # Reward higher aspect ratios
             width_score = min(candidate['width_ratio'] / 0.8, 1.0)  # Reward wider lines
             
-            # Anti-glare quality scores
-            solidity_score = candidate['solidity']  # Higher is better (more solid shape)
-            extent_score = candidate['extent']  # Higher is better (fills bounding box better)
-            compactness_score = min(candidate['compactness'] * 10, 1.0)  # Normalized compactness
-            
-            # Weighted combination with anti-glare factors
-            quality_score = (solidity_score + extent_score + compactness_score) / 3.0
-            
-            total_score = (area_score * 0.25 + 
-                          center_score * 0.25 + 
-                          aspect_score * 0.15 + 
-                          width_score * 0.15 +
-                          quality_score * 0.20)  # Anti-glare quality gets 20% weight
+            # Weighted combination
+            total_score = (area_score * 0.3 + 
+                          center_score * 0.3 + 
+                          aspect_score * 0.2 + 
+                          width_score * 0.2)
             
             if total_score > best_score:
                 best_score = total_score
@@ -980,16 +891,15 @@ class JetBotController:
         if best_candidate is None:
             return False, "NO_GOOD_CANDIDATE", None
         
-        # === ENHANCED CONFIDENCE ASSESSMENT WITH QUALITY METRICS ===
+        # === ENHANCED CONFIDENCE ASSESSMENT ===
         confidence_level = "LOW"
-        if best_score > 0.65:  # Slightly higher threshold due to quality metrics
+        if best_score > 0.6:
             confidence_level = "HIGH"
-        elif best_score > 0.40:
+        elif best_score > 0.35:
             confidence_level = "MEDIUM"
         
-        # Additional confidence boost for very horizontal lines with good quality
-        if (abs(best_candidate.get('line_angle', 0)) < 15 and
-            best_candidate.get('solidity', 0) > 0.6):
+        # Additional confidence boost for very horizontal lines
+        if abs(best_candidate.get('line_angle', 0)) < 15:
             if confidence_level == "MEDIUM":
                 confidence_level = "HIGH"
             elif confidence_level == "LOW":
