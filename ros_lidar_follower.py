@@ -63,7 +63,7 @@ class JetBotController:
         self.camera_intersection_detected = False
         self.camera_detection_time = 0
         self.waiting_for_lidar_confirmation = False
-        self.lidar_confirmation_timeout = 3.0  # 3 seconds to wait for LiDAR
+        self.lidar_confirmation_timeout = 4  # 3 seconds to wait for LiDAR
         
         rospy.Subscriber('/scan', LaserScan, self.detector.callback)
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
