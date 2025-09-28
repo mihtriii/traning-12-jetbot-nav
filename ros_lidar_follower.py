@@ -373,21 +373,13 @@ class JetBotController:
 
         self.CORRECTION_GAIN = 0.5
         self.SAFE_ZONE_PERCENT = 0.3
-        self.LINE_COLOR_LOWER = np.array([0, 0, 0])      # HSV lower bound cho line đen
-        self.LINE_COLOR_UPPER = np.array([180, 255, 150])  # Tăng Value từ 120 lên 150 để xử lý ánh sáng chói
+        self.LINE_COLOR_LOWER = np.array([0, 0, 0])
+        self.LINE_COLOR_UPPER = np.array([180, 255, 120])  # Increased Value from 75 to 120 for better black line detection
         self.INTERSECTION_CLEARANCE_DURATION = 1.5
         self.INTERSECTION_APPROACH_DURATION = 0.5
         self.LINE_REACQUIRE_TIMEOUT = 3.0
         self.SCAN_PIXEL_THRESHOLD = 100
         self.initialize_motion_flags = True
-        
-        # Tối ưu hóa PID Controller cho line following
-        self.KP = 0.8          # Proportional gain - tăng từ 0.5
-        self.KI = 0.1          # Integral gain - mới thêm
-        self.KD = 0.3          # Derivative gain - mới thêm
-        self.previous_error = 0.0
-        self.integral_error = 0.0
-        self.max_integral = 0.5  # Giới hạn integral windup
         
         # Parameters cho Flag Detection (Phát hiện cờ đỏ che camera)
         self.FLAG_DETECTION_ENABLED = True          # Bật/tắt tính năng phát hiện cờ
@@ -583,11 +575,6 @@ class JetBotController:
             # Reset line validation counter khi rời khỏi LINE_VALIDATION state
             if self.current_state == RobotState.LINE_VALIDATION and new_state != RobotState.LINE_VALIDATION:
                 self.line_validation_attempts = 0
-            
-            # Reset PID controller khi bắt đầu bám line mới
-            if new_state == RobotState.DRIVING_STRAIGHT:
-                self.reset_pid()
-                rospy.loginfo("🎯 Reset PID controller cho line mới")
                 
             self.current_state = new_state
             self.state_change_time = rospy.get_time()
@@ -1252,8 +1239,8 @@ class JetBotController:
         forward_speed = self.BASE_SPEED * 0.7
         self.robot.set_motors(forward_speed, forward_speed)
 
-        # Di chuyển trong 1.3 giây (có thể điều chỉnh)
-        time.sleep(1.3)
+        # Di chuyển trong 1.5 giây (có thể điều chỉnh)
+        time.sleep(1.5)
         
         # Dừng lại
         self.robot.stop()
@@ -1261,168 +1248,25 @@ class JetBotController:
     
     def correct_course(self, line_center_x):
         """
-        Hàm bám line tối ưu với PID controller và safe zone động.
+        Hàm bám line an toàn với cơ chế giới hạn lực bẻ lái.
         """
         error = line_center_x - (self.WIDTH / 2)
         
-        # === SAFE ZONE ĐỘNG DỰA TRÊN TỐC ĐỘ VÀ ĐỘ LỆCH ===
-        # Safe zone nhỏ hơn khi robot đi chậm, lớn hơn khi đi nhanh
-        dynamic_safe_zone = self.SAFE_ZONE_PERCENT
-        error_ratio = abs(error) / (self.WIDTH / 2)
-        
-        if error_ratio > 0.7:  # Lệch rất nhiều
-            dynamic_safe_zone = 0.1  # Safe zone nhỏ để phản ứng nhanh
-        elif error_ratio > 0.4:  # Lệch vừa phải
-            dynamic_safe_zone = 0.2  
-        
-        # Vẫn đi thẳng nếu sai số rất nhỏ (trong safe zone động)
-        if abs(error) < (self.WIDTH / 2) * dynamic_safe_zone:
+        # Vẫn đi thẳng nếu sai số rất nhỏ
+        if abs(error) < (self.WIDTH / 2) * self.SAFE_ZONE_PERCENT:
             self.robot.set_motors(self.BASE_SPEED, self.BASE_SPEED)
-            # Reset PID khi ở trung tâm
-            self.integral_error = 0.0
-            self.previous_error = 0.0
             return
 
-        # === PID CONTROLLER TÍNH TOÁN ===
-        # Proportional term
-        P = self.KP * error
+        # Tính toán lực điều chỉnh
+        adj = (error / (self.WIDTH / 2)) * self.CORRECTION_GAIN
+
+        # Ngăn chặn hành vi bẻ lái quá gắt một cách tuyệt đối
+        adj = np.clip(adj, -self.MAX_CORRECTION_ADJ, self.MAX_CORRECTION_ADJ)
         
-        # Integral term với anti-windup
-        self.integral_error += error
-        self.integral_error = np.clip(self.integral_error, -self.max_integral, self.max_integral)
-        I = self.KI * self.integral_error
-        
-        # Derivative term
-        derivative_error = error - self.previous_error
-        D = self.KD * derivative_error
-        self.previous_error = error
-        
-        # Tổng điều chỉnh PID
-        adj = (P + I + D) / (self.WIDTH / 2)
-        
-        # === GIỚI HẠN THÍCH ỨNG DỰA TRÊN ĐỘ LỆCH ===
-        # Cho phép điều chỉnh mạnh hơn khi lệch nhiều
-        max_adj = self.MAX_CORRECTION_ADJ
-        if error_ratio > 0.8:  # Lệch rất nghiêm trọng
-            max_adj = self.MAX_CORRECTION_ADJ * 1.5  # Tăng 50%
-        elif error_ratio > 0.5:  # Lệch nhiều  
-            max_adj = self.MAX_CORRECTION_ADJ * 1.2  # Tăng 20%
-            
-        # Áp dụng giới hạn thích ứng
-        adj = np.clip(adj, -max_adj, max_adj)
-        
-        # === PREDICTIVE STEERING SỬ DỤNG LOOKAHEAD ===
-        # Kiểm tra line ở phía xa để dự đoán
-        lookahead_center = self._get_line_center(self.latest_image, self.LOOKAHEAD_ROI_Y, self.LOOKAHEAD_ROI_H)
-        if lookahead_center is not None:
-            # Tính toán điều chỉnh dự báo
-            lookahead_error = lookahead_center - (self.WIDTH / 2)
-            predictive_adj = (lookahead_error / (self.WIDTH / 2)) * 0.3  # Hệ số dự báo nhỏ
-            adj += predictive_adj
-            
-            # Giới hạn lại sau khi thêm dự báo
-            adj = np.clip(adj, -max_adj, max_adj)
-        
-        # Áp dụng lực điều chỉnh đã được tối ưu
+        # Áp dụng lực điều chỉnh đã được giới hạn
         left_motor = self.BASE_SPEED + adj
         right_motor = self.BASE_SPEED - adj
         self.robot.set_motors(left_motor, right_motor)
-        
-        # Debug logging (throttled)
-        if abs(error) > 50:  # Chỉ log khi lệch đáng kể
-            rospy.loginfo_throttle(1, f"🎯 PID Recenter: Error={error:.1f}, P={P:.3f}, I={I:.3f}, D={D:.3f}, Adj={adj:.3f}")
-        
-    def reset_pid(self):
-        """Reset PID controller state - gọi khi bắt đầu line mới"""
-        self.previous_error = 0.0
-        self.integral_error = 0.0
-        
-    def tune_pid(self, kp=None, ki=None, kd=None):
-        """
-        🎛️ Fine-tune PID parameters trong runtime
-        Usage: tune_pid(kp=0.8, ki=0.1, kd=0.3)
-        """
-        if kp is not None:
-            self.KP = kp
-            rospy.loginfo(f"🎯 Updated KP = {kp}")
-        if ki is not None:
-            self.KI = ki  
-            rospy.loginfo(f"🎯 Updated KI = {ki}")
-        if kd is not None:
-            self.KD = kd
-            rospy.loginfo(f"🎯 Updated KD = {kd}")
-        
-        # Reset để tránh tác động từ các tham số cũ
-        self.reset_pid()
-        rospy.loginfo(f"🎛️ PID Tuned: KP={self.KP}, KI={self.KI}, KD={self.KD}")
-        
-    def adjust_line_detection(self, lower_value=None, upper_value=None):
-        """
-        🌟 Điều chỉnh tham số phát hiện line để xử lý ánh sáng chói
-        Usage: adjust_line_detection(upper_value=180) để xử lý ánh sáng chói mạnh hơn
-        """
-        if lower_value is not None:
-            self.LINE_COLOR_LOWER[2] = lower_value  # Chỉ thay đổi Value channel
-            rospy.loginfo(f"🔧 Updated LINE_COLOR_LOWER Value = {lower_value}")
-            
-        if upper_value is not None:
-            self.LINE_COLOR_UPPER[2] = upper_value  # Chỉ thay đổi Value channel
-            rospy.loginfo(f"🔧 Updated LINE_COLOR_UPPER Value = {upper_value}")
-        
-        rospy.loginfo(f"🌟 Line Detection Parameters: Lower HSV={self.LINE_COLOR_LOWER}, Upper HSV={self.LINE_COLOR_UPPER}")
-        
-    def test_line_detection_with_glare(self):
-        """
-        🧪 Test khác nhau cho xử lý ánh sáng chói
-        """
-        if self.latest_image is None:
-            rospy.logwarn("Không có ảnh để test!")
-            return
-            
-        rospy.loginfo("🧪 Testing line detection với các tham số khác nhau...")
-        
-        # Test với các giá trị Value khác nhau
-        test_values = [120, 150, 180, 200]
-        
-        for value in test_values:
-            # Backup original
-            original_upper = self.LINE_COLOR_UPPER.copy()
-            
-            # Apply test value
-            self.LINE_COLOR_UPPER[2] = value
-            
-            # Test detection
-            line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
-            
-            if line_center is not None:
-                rospy.loginfo(f"✅ Value={value}: Line detected at x={line_center}")
-            else:
-                rospy.loginfo(f"❌ Value={value}: No line detected")
-            
-            # Restore original
-            self.LINE_COLOR_UPPER = original_upper
-            
-        rospy.loginfo("🧪 Line detection test hoàn thành!")
-        
-    def get_line_following_stats(self):
-        """📊 Lấy thống kê hiệu suất line following"""
-        if hasattr(self, 'latest_image') and self.latest_image is not None:
-            line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
-            if line_center is not None:
-                error = line_center - (self.WIDTH / 2)
-                error_percentage = (abs(error) / (self.WIDTH / 2)) * 100
-                return {
-                    'line_center': line_center,
-                    'center_target': self.WIDTH // 2,
-                    'error_pixels': error,
-                    'error_percentage': error_percentage,
-                    'pid_state': {
-                        'previous_error': self.previous_error,
-                        'integral_error': self.integral_error,
-                        'kp': self.KP, 'ki': self.KI, 'kd': self.KD
-                    }
-                }
-        return None
         
     def handle_intersection(self):
         rospy.loginfo("\n[GIAO LỘ] Dừng lại và xử lý...")
