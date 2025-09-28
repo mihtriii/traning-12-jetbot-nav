@@ -28,6 +28,7 @@ class MapNavigator:
         
         response = requests.get(url, params={"token": token, "map_type":"map_z"})
         data = response.json()
+        print(json.dumps(data, indent=2))
 
         for node in data['nodes']:
             self.nodes_data[node['id']] = node
