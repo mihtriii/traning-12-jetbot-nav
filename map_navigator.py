@@ -1,6 +1,6 @@
 # map_navigator.py
 import rospy
-
+import requests
 import json
 import networkx as nx
 import math
@@ -17,21 +17,27 @@ class MapNavigator:
         self.nodes_data = {}
         self.start_node = None
         self.end_node = None
+        self.load_note = []
         self._opposite_direction = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
         self._load_map(map_file_path)
 
     def _load_map(self, map_file_path):
         """Tải và phân tích cú pháp file JSON của bản đồ."""
-        with open(map_file_path, 'r') as f:
-            data = json.load(f)
+        url = "https://hackathon2025-dev.fpt.edu.vn/api/maps/get_active_map"
+        token = "YOURa6f202ada430a9fc154b7707188d7278_TOKEN_HERE"
+        
+        response = requests.get(url, params={"token": token, "map_type":"map_z"})
+        data = response.json()
 
         for node in data['nodes']:
             self.nodes_data[node['id']] = node
             self.graph.add_node(node['id'], **node)
-            if node['type'] == 'start':
+            if node['type'] == 'Start':
                 self.start_node = node['id']
-            elif node['type'] == 'end':
+            elif node['type'] == 'End':
                 self.end_node = node['id']
+            elif node['type'] == 'Load':
+                self.load_note.append(node['id'])
 
         for edge in data['edges']:
             # Thêm cạnh xuôi và cạnh ngược để robot có thể đi hai chiều

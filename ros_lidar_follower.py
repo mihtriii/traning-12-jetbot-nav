@@ -19,8 +19,6 @@ from opposite_detector import SimpleOppositeDetector
 
 from map_navigator import MapNavigator
 
-from dotenv import load_dotenv
-
 class RobotState(Enum):
     DRIVING_STRAIGHT = 1
     LINE_VALIDATION = 1.5
@@ -45,10 +43,12 @@ class JetBotController:
         self.video_writer = None
         self.initialize_video_writer()
 
-        # Initialize map from server (with fallback to local file)
-        if not self.initialize_map_from_server():
-            rospy.logerr("Failed to initialize map navigator!")
-            return
+        self.navigator = MapNavigator(self.MAP_FILE_PATH)
+        self.current_node_id = self.navigator.start_node
+        self.target_node_id = None
+        self.planned_path = None
+        self.banned_edges = []
+        self.plan_initial_route()
 
         self.latest_scan = None
         self.latest_image = None
@@ -165,19 +165,12 @@ class JetBotController:
         self.DATA_ITEMS = {'qr_code', 'math_problem'}
         self.MQTT_BROKER = "localhost"; self.MQTT_PORT = 1883
         self.MQTT_DATA_TOPIC = "jetbot/corrected_event_data"
-        
-        # Server API Configuration
-        self.SERVER_URL = "https://hackathon2025-dev.fpt.edu.vn"
-        self.API_ENDPOINT = "/api/maps/get_active_map/"
-        self.TEAM_TOKEN = self.load_team_token()  # Load from config or env
-        self.MAP_TYPE = "map_z"  # Options: map_a, map_b, map_z
-        
         self.current_state = None
         self.DIRECTIONS = [Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST]
         self.current_direction_index = 1
         self.ANGLE_TO_FACE_SIGN_MAP = {d: a for d, a in zip(self.DIRECTIONS, [45, -45, -135, 135])}
         self.MAX_CORRECTION_ADJ = 0.12
-        self.MAP_FILE_PATH = "map.json"
+        self.MAP_FILE_PATH = "map_z"
         self.LABEL_TO_DIRECTION_ENUM = {'N': Direction.NORTH, 'E': Direction.EAST, 'S': Direction.SOUTH, 'W': Direction.WEST}
         self.VIDEO_OUTPUT_FILENAME = 'jetbot_run.avi'
         self.VIDEO_FPS = 20  # Nên khớp với rospy.Rate của bạn
@@ -1037,145 +1030,6 @@ class JetBotController:
         
         return coverage_ratio > self.FLAG_COVERAGE_THRESHOLD, coverage_ratio
     
-    def load_team_token(self):
-        """
-        Load team token from environment variable, config file, or use default
-        Priority: Environment Variable > Config File > Default
-        """
-        import os
-        load_dotenv()  # Load .env file if present
-        # Try environment variable first
-        token = os.getenv('JETBOT_TEAM_TOKEN')
-        if token:
-            rospy.loginfo("🔑 Using team token from environment variable")
-            return token
-        
-        # Try config file
-        try:
-            config_file = 'team_config.json'
-            if os.path.exists(config_file):
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-                    token = config.get('team_token')
-                    if token:
-                        rospy.loginfo("🔑 Using team token from config file")
-                        return token
-        except Exception as e:
-            rospy.logwarn(f"Failed to load token from config file: {e}")
-        
-        # Default token (should be replaced)
-        rospy.logwarn("⚠️ Using default token - please set JETBOT_TEAM_TOKEN environment variable or create team_config.json")
-        return "YOUR_TEAM_TOKEN"
-    
-    def fetch_map_from_server(self, map_type=None):
-        """
-        Fetch map data from server API
-        Args:
-            map_type: Optional map type override (map_a, map_b, map_z)
-        Returns:
-            dict: Map data from server or None if failed
-        """
-        try:
-            # Use provided map_type or default from config
-            selected_map_type = map_type or self.MAP_TYPE
-            
-            # Build API URL
-            api_url = f"{self.SERVER_URL}{self.API_ENDPOINT}"
-            params = {
-                'token': self.TEAM_TOKEN,
-                'map_type': selected_map_type
-            }
-            
-            rospy.loginfo(f"🌐 Fetching map from server: {api_url}")
-            rospy.loginfo(f"📍 Map type: {selected_map_type}")
-            
-            # Make API request
-            response = requests.get(
-                api_url,
-                params=params,
-                headers={'Content-Type': 'application/json'},
-                timeout=10  # 10 second timeout
-            )
-            
-            # Check response status
-            if response.status_code == 200:
-                map_data = response.json()
-                rospy.loginfo("✅ Map data fetched successfully from server!")
-                
-                # Optionally save to local file as backup
-                backup_filename = f"map_{selected_map_type}_backup.json"
-                try:
-                    with open(backup_filename, 'w') as f:
-                        json.dump(map_data, f, indent=2)
-                    rospy.loginfo(f"💾 Map backup saved to {backup_filename}")
-                except Exception as e:
-                    rospy.logwarn(f"Failed to save map backup: {e}")
-                
-                return map_data
-                
-            else:
-                rospy.logerr(f"❌ Server returned error: {response.status_code} - {response.text}")
-                return None
-                
-        except requests.exceptions.Timeout:
-            rospy.logerr("⏰ Request timed out while fetching map from server")
-            return None
-        except requests.exceptions.ConnectionError:
-            rospy.logerr("🔌 Connection error while fetching map from server")
-            return None
-        except requests.exceptions.RequestException as e:
-            rospy.logerr(f"🚫 Request error while fetching map: {e}")
-            return None
-        except Exception as e:
-            rospy.logerr(f"💥 Unexpected error while fetching map: {e}")
-            return None
-    
-    def initialize_map_from_server(self):
-        """
-        Initialize map navigator with data from server
-        Fallback to local file if server is unavailable
-        """
-        rospy.loginfo("🗺️ Initializing map from server...")
-        
-        # Try to fetch from server first
-        server_map_data = self.fetch_map_from_server()
-        
-        if server_map_data:
-            # Use server data - save to temporary file and load
-            rospy.loginfo("🌐 Using map data from server")
-            try:
-                # Save server data to temporary file
-                temp_map_file = "temp_server_map.json"
-                with open(temp_map_file, 'w') as f:
-                    json.dump(server_map_data, f, indent=2)
-                
-                # Initialize navigator with temporary file
-                self.navigator = MapNavigator(temp_map_file)
-                self.current_node_id = self.navigator.start_node
-                self.target_node_id = None
-                self.planned_path = None
-                self.banned_edges = []
-                self.plan_initial_route()
-                rospy.loginfo("✅ Map navigator initialized with server data!")
-                return True
-            except Exception as e:
-                rospy.logerr(f"Failed to initialize navigator with server data: {e}")
-        
-        # Fallback to local file
-        rospy.logwarn("⚠️ Falling back to local map file...")
-        try:
-            self.navigator = MapNavigator(self.MAP_FILE_PATH)
-            self.current_node_id = self.navigator.start_node
-            self.target_node_id = None
-            self.planned_path = None
-            self.banned_edges = []
-            self.plan_initial_route()
-            rospy.loginfo("✅ Map navigator initialized with local file!")
-            return True
-        except Exception as e:
-            rospy.logerr(f"❌ Failed to initialize navigator with local file: {e}")
-            return False
-
     def check_camera_lidar_intersection(self):
         """
         Kiểm tra giao lộ với logic: Camera detect trước, LiDAR confirm sau.
