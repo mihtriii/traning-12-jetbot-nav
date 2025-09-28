@@ -65,14 +65,6 @@ class JetBotController:
         self.waiting_for_lidar_confirmation = False
         self.lidar_confirmation_timeout = 4.0  # 4 seconds to wait for LiDAR
         
-        # Enhanced intersection detection with confidence tracking
-        self.intersection_confidence_score = 0.0
-        self.recent_line_detections = []  # Ring buffer for line detection history
-        self.line_detection_history_size = 10
-        self.intersection_detection_frames = 0
-        self.min_intersection_confidence = 3  # Min consecutive frames needed
-        self.intersection_temporal_window = 1.0  # Time window for detection stability
-        
         rospy.Subscriber('/scan', LaserScan, self.detector.callback)
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
         rospy.loginfo("Đã đăng ký vào các topic /scan và /csi_cam_0/image_raw.")
@@ -131,7 +123,27 @@ class JetBotController:
         state_text = f"State: {self.current_state.name if self.current_state else 'None'}"
         cv2.putText(debug_frame, state_text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
         
-        # 3. Vẽ line và trọng tâm (nếu robot đang bám line)
+        # 3. Vẽ thông tin FLAGS
+        y_offset = 40
+        
+        # Flag khởi động robot
+        start_color = (0, 255, 0) if self.robot_start_enabled else (0, 0, 255)  # Xanh lá/Đỏ
+        start_text = f"START: {'ON' if self.robot_start_enabled else 'OFF'}"
+        cv2.putText(debug_frame, start_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, start_color, 1, cv2.LINE_AA)
+        y_offset += 20
+        
+        # Flag LINE_VALIDATION
+        validation_color = (0, 255, 0) if self.line_validation_enabled else (0, 0, 255)  # Xanh lá/Đỏ  
+        validation_text = f"VALIDATION: {'ON' if self.line_validation_enabled else 'OFF'}"
+        cv2.putText(debug_frame, validation_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, validation_color, 1, cv2.LINE_AA)
+        y_offset += 20
+        
+        # Flag đã tìm thấy line lần đầu
+        initial_color = (0, 255, 0) if self.initial_line_found else (0, 0, 255)  # Xanh lá/Đỏ
+        initial_text = f"INIT_LINE: {'FOUND' if self.initial_line_found else 'NOT_FOUND'}"
+        cv2.putText(debug_frame, initial_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, initial_color, 1, cv2.LINE_AA)
+        
+        # 4. Vẽ line và trọng tâm (nếu robot đang bám line)
         if self.current_state == RobotState.DRIVING_STRAIGHT:
             # Lấy line center của ROI Chính
             line_center = self._get_line_center(image, self.ROI_Y, self.ROI_H)
@@ -139,234 +151,7 @@ class JetBotController:
                 # Vẽ một đường thẳng đứng màu đỏ tại vị trí trọng tâm
                 cv2.line(debug_frame, (line_center, self.ROI_Y), (line_center, self.ROI_Y + self.ROI_H), (0, 0, 255), 2)
 
-        # 4. Vẽ thông tin Red Flag Detection
-        if self.FLAG_DETECTION_ENABLED:
-            y_offset = 60
-            flag_status = "WAITING" if self.WAITING_FOR_FLAG_REMOVAL else "MONITORING"
-            flag_color = (0, 255, 255) if self.WAITING_FOR_FLAG_REMOVAL else (0, 255, 0)  # Yellow if waiting, Green if monitoring
-            flag_text = f"Red Flag: {flag_status}"
-            cv2.putText(debug_frame, flag_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, flag_color, 1, cv2.LINE_AA)
-            
-            # Vẽ counters
-            y_offset += 15
-            counter_text = f"Det:{self.flag_detected_count} Clear:{self.flag_clear_count}"
-            cv2.putText(debug_frame, counter_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1, cv2.LINE_AA)
-
         return debug_frame
-
-    def detect_flag_covering_camera(self, image):
-        """
-        Phát hiện cờ đỏ che camera bằng cách kiểm tra màu đỏ trong ảnh.
-        Returns: True nếu camera bị che bởi cờ đỏ
-        """
-        if image is None:
-            return False
-            
-        # Chuyển ảnh sang HSV để detect màu đỏ tốt hơn
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        
-        # Tạo mask cho màu đỏ (màu đỏ có 2 range trong HSV)
-        # Range 1: 0-10 (đỏ nhạt)
-        mask1 = cv2.inRange(hsv, self.FLAG_RED_LOWER, self.FLAG_RED_UPPER)
-        # Range 2: 160-180 (đỏ đậm)
-        mask2 = cv2.inRange(hsv, self.FLAG_RED_LOWER2, self.FLAG_RED_UPPER2)
-        
-        # Kết hợp 2 masks
-        red_mask = cv2.bitwise_or(mask1, mask2)
-        
-        # Làm mịn mask để loại bỏ noise
-        kernel = np.ones((5,5), np.uint8)
-        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
-        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
-        
-        # Tính tỷ lệ pixel đỏ
-        red_pixels = np.sum(red_mask > 0)
-        total_pixels = image.shape[0] * image.shape[1]
-        red_ratio = red_pixels / total_pixels
-        
-        # Tìm contours để kiểm tra diện tích vùng đỏ lớn nhất
-        _, contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        max_area = 0
-        if contours:
-            max_area = max([cv2.contourArea(c) for c in contours])
-        
-        # Xác định có cờ đỏ che không
-        is_covered = (red_ratio > self.FLAG_COVERAGE_RATIO_THRESHOLD and 
-                     max_area > self.FLAG_MIN_AREA_THRESHOLD)
-        
-        if self.FLAG_DETECTION_ENABLED:
-            rospy.loginfo_throttle(1, f"Red Flag Detection: red_ratio={red_ratio:.3f}, "
-                                    f"max_area={max_area:.0f}, covered={is_covered}")
-        
-        return is_covered
-
-    def check_flag_status_and_wait(self):
-        """
-        Kiểm tra trạng thái cờ và xử lý logic chờ đợi.
-        Logic: Phất cờ để bắt đầu, hold cho đến khi thấy line
-        Returns: True nếu robot được phép tiếp tục, False nếu cần dừng
-        """
-        if not self.FLAG_DETECTION_ENABLED:
-            return True  # Nếu tắt tính năng thì luôn cho phép di chuyển
-            
-        if self.latest_image is None:
-            return False  # Không có ảnh thì dừng an toàn
-        
-        flag_covering = self.detect_flag_covering_camera(self.latest_image)
-        
-        # Logic phát hiện cờ che
-        if flag_covering:
-            self.flag_detected_count += 1
-            self.flag_clear_count = 0
-            
-            if self.flag_detected_count >= self.FLAG_CHECK_FRAMES:
-                if not self.WAITING_FOR_FLAG_REMOVAL:
-                    rospy.logwarn("🚩 CỜ ĐỎ PHÁT HIỆN! Robot dừng hoàn toàn và chờ cờ được phất...")
-                    # Đảm bảo robot dừng ngay lập tức
-                    self.robot.stop()
-                    self.WAITING_FOR_FLAG_REMOVAL = True
-                
-                # Robot bị khóa hoàn toàn khi có cờ che
-                rospy.logwarn_throttle(2, "⏳ CAMERA BỊ CHE! Robot đang chờ cờ đỏ được phất...")
-                self.robot.stop()  # Đảm bảo robot dừng
-                
-                # Sleep 2 giây để recheck như yêu cầu
-                rospy.loginfo_throttle(5, "💤 Sleep 2s để recheck camera...")
-                time.sleep(2.0)
-                return False  # Dừng robot
-        else:
-            # Không có cờ che
-            self.flag_clear_count += 1
-            self.flag_detected_count = 0
-            
-            if self.WAITING_FOR_FLAG_REMOVAL:
-                if self.flag_clear_count >= self.FLAG_CLEAR_FRAMES:
-                    # Cờ đỏ đã được phất, bắt đầu tìm line
-                    rospy.loginfo("✅ CỜ ĐỎ ĐÃ ĐƯỢC PHẤT! Camera sạch, bắt đầu tìm kiếm line...")
-                    self.WAITING_FOR_FLAG_REMOVAL = False
-                    # Từ bây giờ chỉ cần kiểm tra line, không cần kiểm tra cờ nữa
-                else:
-                    rospy.loginfo_throttle(2, f"⏳ Đang xác nhận cờ đã phất... ({self.flag_clear_count}/{self.FLAG_CLEAR_FRAMES})")
-                    return False  # Vẫn chờ xác nhận
-                    
-                # Sau khi cờ được phất, chỉ kiểm tra line
-                line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
-                if line_center is not None:
-                    rospy.loginfo("🎯 LINE DETECTED! Robot được phép tiếp tục hoạt động...")
-                    return True
-                else:
-                    rospy.loginfo_throttle(2, "🔍 Đang tìm kiếm line...")
-                    return False
-            else:
-                # Không trong trạng thái chờ cờ, kiểm tra line bình thường
-                line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
-                if line_center is not None:
-                    return True  # Có line, cho phép tiếp tục
-                else:
-                    rospy.loginfo_throttle(3, "⏳ Đang chờ detect line để tiếp tục...")
-                    return False  # Không có line, dừng lại
-                    
-        return False  # Trường hợp mặc định là dừng an toàn
-
-    def enable_flag_detection(self):
-        """
-        🚩 Bật tính năng phát hiện cờ che camera
-        """
-        self.FLAG_DETECTION_ENABLED = True
-        rospy.loginfo("🚩 FLAG DETECTION ENABLED: Tính năng phát hiện cờ đã được bật")
-        
-    def disable_flag_detection(self):
-        """
-        🚫 Tắt tính năng phát hiện cờ che camera
-        """
-        self.FLAG_DETECTION_ENABLED = False
-        self.WAITING_FOR_FLAG_REMOVAL = False  # Reset trạng thái chờ
-        self.flag_detected_count = 0
-        self.flag_clear_count = 0
-        rospy.loginfo("🚫 FLAG DETECTION DISABLED: Tính năng phát hiện cờ đã được tắt")
-        
-    def reset_flag_detection(self):
-        """
-        🔄 Reset trạng thái phát hiện cờ
-        """
-        self.WAITING_FOR_FLAG_REMOVAL = False
-        self.flag_detected_count = 0
-        self.flag_clear_count = 0
-        rospy.loginfo("🔄 FLAG DETECTION RESET: Đã reset trạng thái phát hiện cờ")
-        
-    def get_flag_status(self):
-        """
-        📊 Lấy trạng thái hiện tại của flag detection
-        """
-        return {
-            'enabled': self.FLAG_DETECTION_ENABLED,
-            'waiting_for_removal': self.WAITING_FOR_FLAG_REMOVAL,
-            'detected_count': self.flag_detected_count,
-            'clear_count': self.flag_clear_count,
-            'line_search_mode': self.LINE_SEARCH_MODE
-        }
-
-    def enable_line_search_mode(self):
-        """
-        🔍 Bật chế độ tìm kiếm line (robot dừng cho đến khi thấy line)
-        """
-        self.LINE_SEARCH_MODE = True
-        rospy.loginfo("🔍 LINE SEARCH MODE ENABLED: Robot sẽ hold cho đến khi thấy line")
-        
-    def disable_line_search_mode(self):
-        """
-        🚫 Tắt chế độ tìm kiếm line (robot hoạt động bình thường)
-        """
-        self.LINE_SEARCH_MODE = False
-        rospy.loginfo("🚫 LINE SEARCH MODE DISABLED: Robot hoạt động bình thường")
-        
-    def force_start_without_flag(self):
-        """
-        🚀 Ép buộc robot bắt đầu mà không cần chờ cờ
-        """
-        self.WAITING_FOR_FLAG_REMOVAL = False
-        self.flag_detected_count = 0
-        self.flag_clear_count = 0
-        rospy.loginfo("🚀 FORCE START: Robot bỏ qua chờ cờ và bắt đầu hoạt động")
-
-    def adjust_red_sensitivity(self, coverage_ratio=None, min_area=None):
-        """
-        🎯 Điều chỉnh độ nhạy phát hiện cờ đỏ
-        Args:
-            coverage_ratio: Tỷ lệ % pixel đỏ cần thiết (0.1-0.8)
-            min_area: Diện tích tối thiểu của vùng đỏ (1000-10000)
-        """
-        if coverage_ratio is not None:
-            self.FLAG_COVERAGE_RATIO_THRESHOLD = max(0.1, min(0.8, coverage_ratio))
-            rospy.loginfo(f"🎯 Red coverage ratio set to: {self.FLAG_COVERAGE_RATIO_THRESHOLD:.2f}")
-            
-        if min_area is not None:
-            self.FLAG_MIN_AREA_THRESHOLD = max(1000, min(20000, min_area))
-            rospy.loginfo(f"🎯 Red min area set to: {self.FLAG_MIN_AREA_THRESHOLD}")
-            
-    def calibrate_red_color(self, h_range=(0, 10), s_min=50, v_min=50):
-        """
-        🌈 Hiệu chỉnh dải màu đỏ để detect
-        Args:
-            h_range: Tuple (min_hue, max_hue) cho màu đỏ chính
-            s_min: Saturation tối thiểu
-            v_min: Value tối thiểu
-        """
-        self.FLAG_RED_LOWER = np.array([h_range[0], s_min, v_min])
-        self.FLAG_RED_UPPER = np.array([h_range[1], 255, 255])
-        rospy.loginfo(f"🌈 Red color range calibrated: H{h_range}, S>{s_min}, V>{v_min}")
-
-    def test_red_detection(self):
-        """
-        🔬 Test màu đỏ detection với ảnh hiện tại
-        """
-        if self.latest_image is None:
-            rospy.logwarn("No image available for red detection test")
-            return
-            
-        result = self.detect_flag_covering_camera(self.latest_image)
-        rospy.loginfo(f"🔬 Red flag detection test result: {result}")
-        return result
 
     def setup_parameters(self):
         self.WIDTH, self.HEIGHT = 300, 300
@@ -387,22 +172,6 @@ class JetBotController:
         self.INTERSECTION_APPROACH_DURATION = 0.5
         self.LINE_REACQUIRE_TIMEOUT = 3.0
         self.SCAN_PIXEL_THRESHOLD = 100
-        self.initialize_motion_flags = True
-        
-        # Parameters cho Flag Detection (Phát hiện cờ đỏ che camera)
-        self.FLAG_DETECTION_ENABLED = True          # Bật/tắt tính năng phát hiện cờ
-        self.FLAG_RED_LOWER = np.array([0, 50, 50])    # HSV lower bound cho màu đỏ
-        self.FLAG_RED_UPPER = np.array([10, 255, 255]) # HSV upper bound cho màu đỏ (đỏ nhạt)
-        self.FLAG_RED_LOWER2 = np.array([160, 50, 50]) # HSV lower bound cho màu đỏ (đỏ đậm) 
-        self.FLAG_RED_UPPER2 = np.array([180, 255, 255]) # HSV upper bound cho màu đỏ (đỏ đậm)
-        self.FLAG_COVERAGE_RATIO_THRESHOLD = 0.3    # Tỷ lệ % camera bị che màu đỏ để xác định có cờ
-        self.FLAG_MIN_AREA_THRESHOLD = 5000         # Diện tích tối thiểu của vùng đỏ
-        self.FLAG_CHECK_FRAMES = 5                  # Số frame liên tiếp để xác nhận có cờ
-        self.FLAG_CLEAR_FRAMES = 3                  # Số frame liên tiếp để xác nhận cờ đã được phất
-        self.WAITING_FOR_FLAG_REMOVAL = False       # Trạng thái đang chờ cờ được phất
-        self.flag_detected_count = 0                # Counter cho flag detection
-        self.flag_clear_count = 0                   # Counter cho flag clear detection
-        self.LINE_SEARCH_MODE = True                # Chế độ hold cho đến khi thấy line
         self.YOLO_MODEL_PATH = "models/best.onnx"
         self.YOLO_CONF_THRESHOLD = 0.6
         self.YOLO_INPUT_SIZE = (640, 640)
@@ -424,6 +193,11 @@ class JetBotController:
         # Codec 'MJPG' rất phổ biến và tương thích tốt
         self.VIDEO_FOURCC = cv2.VideoWriter_fourcc(*'MJPG')
         
+        # Flag detection parameters
+        self.FLAG_RED_LOWER = np.array([0, 100, 100])
+        self.FLAG_RED_UPPER = np.array([10, 255, 255])
+        self.FLAG_COVERAGE_THRESHOLD = 0.3  # 30% of image covered to be considered flag
+        
         # Parameters cho LINE_VALIDATION state
         self.LINE_VALIDATION_TIMEOUT = 2.0  # Thời gian tối đa để validate line position
         self.LINE_CENTER_TOLERANCE = 0.2    # Tỷ lệ cho phép line lệch khỏi center (20% width)
@@ -436,6 +210,12 @@ class JetBotController:
         self.CROSS_MIN_ASPECT_RATIO = 1.5           # Reduced from 2.0 to 1.5 - catch thinner cross lines
         self.CROSS_MIN_WIDTH_RATIO = 0.3            # Reduced from 0.4 to 0.3 - catch shorter cross lines
         self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
+        
+        # FLAGS để kiểm soát khởi động và trạng thái robot
+        self.robot_start_enabled = False            # Flag để cho phép robot chạy (mặc định False)
+        self.line_validation_enabled = False        # Flag để cho phép LINE_VALIDATION (mặc định False) 
+        self.initial_line_found = False             # Flag để theo dõi đã tìm thấy line lần đầu chưa
+        self.startup_wait_timeout = 3000.0            # Timeout (giây) để chờ phét cờ khởi động
 
     def initialize_hardware(self):
         try:
@@ -454,6 +234,75 @@ class JetBotController:
         except Exception as e:
             rospy.logerr(f"Không thể tải mô hình YOLO từ '{self.YOLO_MODEL_PATH}'. Lỗi: {e}")
             self.yolo_session = None
+
+    def wait_for_start_permission(self):
+        """
+        Chờ người dùng phất cờ khởi động. Robot sẽ không chạy cho đến khi được phép.
+        """
+        rospy.loginfo("🏁 CHỜ LỆNH KHỞI ĐỘNG: Robot đang chờ phét cờ để bắt đầu...")
+        rospy.loginfo("🏁 Sử dụng: controller.set_robot_start_flag(True) để khởi động robot")
+        
+        start_wait_time = rospy.get_time()
+        rate = rospy.Rate(5)  # Check 5 lần per giây
+        
+        while not rospy.is_shutdown() and not self.robot_start_enabled:
+            elapsed = rospy.get_time() - start_wait_time
+            if elapsed > self.startup_wait_timeout:
+                rospy.logwarn("⏰ TIMEOUT: Đã chờ quá lâu để khởi động, robot vẫn không được phép chạy.")
+                return False
+            
+            rospy.loginfo_throttle(10, f"⏳ Vẫn đang chờ lệnh khởi động... ({elapsed:.1f}s/{self.startup_wait_timeout}s)")
+            rate.sleep()
+        
+        if self.robot_start_enabled:
+            rospy.loginfo("✅ ĐƯỢC PHÉP KHỞI ĐỘNG: Robot đã được phép chạy!")
+            return True
+        return False
+
+    def set_robot_start_flag(self, enabled=True):
+        """
+        Phét cờ để cho phép robot khởi động.
+        Args:
+            enabled (bool): True để cho phép khởi động, False để dừng
+        """
+        self.robot_start_enabled = enabled
+        if enabled:
+            rospy.loginfo("🚀 FLAG SET: Robot đã được phép khởi động!")
+        else:
+            rospy.loginfo("🛑 FLAG UNSET: Robot bị cấm khởi động!")
+
+    def set_line_validation_flag(self, enabled=True):
+        """
+        Phét cờ để cho phép LINE_VALIDATION.
+        Args:
+            enabled (bool): True để cho phép LINE_VALIDATION, False để cấm
+        """
+        self.line_validation_enabled = enabled
+        if enabled:
+            rospy.loginfo("📏 LINE_VALIDATION FLAG SET: Đã cho phép LINE_VALIDATION!")
+        else:
+            rospy.loginfo("🚫 LINE_VALIDATION FLAG UNSET: Cấm LINE_VALIDATION!")
+
+    def mark_initial_line_found(self):
+        """
+        Đánh dấu đã tìm thấy line lần đầu tiên.
+        Chỉ được gọi khi robot detect được line ổn định lần đầu.
+        """
+        if not self.initial_line_found:
+            self.initial_line_found = True
+            rospy.loginfo("🎯 INITIAL LINE FOUND: Đã tìm thấy line lần đầu tiên!")
+
+    def get_flags_status(self):
+        """
+        Lấy thông tin trạng thái của tất cả flags.
+        Returns:
+            dict: Trạng thái các flags
+        """
+        return {
+            'robot_start_enabled': self.robot_start_enabled,
+            'line_validation_enabled': self.line_validation_enabled,
+            'initial_line_found': self.initial_line_found
+        }
 
     def numpy_nms(self, boxes, scores, iou_threshold):
         """
@@ -567,6 +416,28 @@ class JetBotController:
         rospy.loginfo(f"YOLO đã phát hiện {len(final_detections)} đối tượng cuối cùng.")
         return final_detections
 
+    def detect_red_flag(self, image):
+        """
+        Detect red flag covering camera
+        Returns True if red flag is detected, False otherwise
+        """
+        if image is None:
+            return False
+            
+        # Convert BGR to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Create mask for red color
+        mask = cv2.inRange(hsv, self.FLAG_RED_LOWER, self.FLAG_RED_UPPER)
+        
+        # Calculate coverage percentage
+        total_pixels = image.shape[0] * image.shape[1]
+        red_pixels = cv2.countNonZero(mask)
+        coverage_ratio = red_pixels / total_pixels
+        
+        # Return True if coverage exceeds threshold
+        return coverage_ratio > self.FLAG_COVERAGE_THRESHOLD
+
     def initialize_mqtt(self):
         self.mqtt_client = mqtt.Client()
         def on_connect(client, userdata, flags, rc): rospy.loginfo(f"Kết nối MQTT: {'Thành công' if rc == 0 else 'Thất bại'}")
@@ -599,24 +470,32 @@ class JetBotController:
         except Exception as e: rospy.logerr(f"Lỗi chuyển đổi ảnh: {e}")
 
     def run(self):
-        rospy.loginfo("Bắt đầu vòng lặp. Đợi 3 giây..."); time.sleep(3); rospy.loginfo("Hành trình bắt đầu!")
+        rospy.loginfo("Bắt đầu vòng lặp. Đợi 3 giây..."); time.sleep(3)
+        
+        # KIỂM TRA FLAG KHỞI ĐỘNG - Robot sẽ không chạy cho đến khi được phép
+        if not self.wait_for_start_permission():
+            rospy.logerr("❌ KHỞI ĐỘNG BỊ HỦY: Không nhận được lệnh khởi động trong thời gian cho phép!")
+            return  # Exit run method nếu không được phép khởi động
+        
+        rospy.loginfo("🎉 Hành trình bắt đầu!")
         self.detector.start_scanning()
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
+            # ===================================================================
+            # FLAG CHECK: Kiểm tra cờ đỏ trước khi làm bất cứ gì
+            # ===================================================================
+            if self.latest_image is not None and self.detect_red_flag(self.latest_image):
+                rospy.loginfo("🚩 PHÁT HIỆN CỜ ĐỎ - Robot đang chờ...")
+                self.robot.stop()
+                time.sleep(2.0)  # Hold 2 seconds
+                continue  # Recheck flag in next iteration
+                
             # ===================================================================
             # TRẠNG THÁI 1: ĐANG BÁM LINE (DRIVING_STRAIGHT)
             # ===================================================================
             if self.current_state == RobotState.DRIVING_STRAIGHT:
                 if self.latest_image is None:
                     rospy.logwarn_throttle(5, "Đang chờ dữ liệu hình ảnh từ topic camera...")
-                    self.robot.stop()
-                    rate.sleep()
-                    continue
-
-                # --- BƯỚC 0: KIỂM TRA CỜ CHE CAMERA ---
-                # Kiểm tra trước tất cả các bước khác
-                if not self.check_flag_status_and_wait():
-                    rospy.logwarn_throttle(3, "🚩 Robot dừng do cờ che camera hoặc chờ phất cờ...")
                     self.robot.stop()
                     rate.sleep()
                     continue
@@ -640,14 +519,12 @@ class JetBotController:
                         self.handle_intersection()
                     continue # Bắt đầu vòng lặp mới với trạng thái mới
 
-                # --- BƯỚC 2: ENHANCED CROSSROAD DETECTION ---
-                # Sử dụng enhanced crossroad detection kết hợp multiple methods
-                is_crossroad_detected, crossroad_confidence, detection_method = self._enhanced_crossroad_detection()
+                # --- BƯỚC 2: LOGIC "NHÌN XA HƠN" VỚI ROI DỰ BÁO ---
+                # Nếu LiDAR im lặng, kiểm tra xem vạch kẻ có sắp biến mất ở phía xa không.
+                lookahead_line_center = self._get_line_center(self.latest_image, self.LOOKAHEAD_ROI_Y, self.LOOKAHEAD_ROI_H)
 
-                if is_crossroad_detected:
-                    rospy.logwarn(f"🎯 SỰ KIỆN (Enhanced Crossroad): Phát hiện giao lộ ngã tư với confidence {crossroad_confidence:.2f}!")
-                    rospy.loginfo(f"📊 Detection methods: {detection_method}")
-                    
+                if lookahead_line_center is None:
+                    rospy.logwarn("SỰ KIỆN (Dự báo): Vạch kẻ đường biến mất ở phía xa. Chuẩn bị vào giao lộ.")
                     # Hành động phòng ngừa: chuyển sang trạng thái đi thẳng vào giao lộ.
                     self._set_state(RobotState.APPROACHING_INTERSECTION)
                     time.sleep(0.3)
@@ -658,17 +535,28 @@ class JetBotController:
                 execution_line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
 
                 if execution_line_center is not None:
+                    # Đánh dấu đã tìm thấy line lần đầu khi robot bắt đầu detect line
+                    if not self.initial_line_found:
+                        self.mark_initial_line_found()
+                    
                     # Kiểm tra xem line có nằm trong khoảng hợp lệ không trước khi bám
                     if not self._is_line_in_valid_range(self.latest_image):
-
-                        rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
-                        self.line_validation_attempts = 0  # Reset counter
-                        
-                        self._set_state(RobotState.LINE_VALIDATION)
-                        continue
+                        # CHỈ cho phép LINE_VALIDATION nếu các điều kiện được thỏa mãn
+                        if self.initial_line_found and self.line_validation_enabled:
+                            rospy.logwarn("SỰ KIỆN: Line position không hợp lệ, chuyển sang LINE_VALIDATION để kiểm tra.")
+                            self.line_validation_attempts = 0  # Reset counter
+                            self._set_state(RobotState.LINE_VALIDATION)
+                            continue
+                        else:
+                            # Không được phép LINE_VALIDATION, tiếp tục bám line hiện tại
+                            reason = []
+                            if not self.initial_line_found:
+                                reason.append("chưa tìm được line lần đầu")
+                            if not self.line_validation_enabled:
+                                reason.append("LINE_VALIDATION bị cấm")
+                            rospy.logwarn(f"⚠️ Line không hợp lệ nhưng không thể LINE_VALIDATION do: {', '.join(reason)}")
                     
                     # An toàn để bám line, vì chúng ta biết phía trước không có giao lộ đột ngột.
-
                     self.correct_course(execution_line_center)
                     
                     # Phân tích và in góc line (nếu được bật)
@@ -681,15 +569,20 @@ class JetBotController:
             # TRẠNG THÁI 1.5: KIỂM TRA VÀ XÁC THỰC VỊ TRÍ LINE (LINE_VALIDATION)
             # ===================================================================
             elif self.current_state == RobotState.LINE_VALIDATION:
+                # Kiểm tra flag LINE_VALIDATION có được bật không
+                if not self.line_validation_enabled:
+                    rospy.logwarn("⚠️ LINE_VALIDATION bị cấm bằng flag, chuyển về DRIVING_STRAIGHT")
+                    self._set_state(RobotState.DRIVING_STRAIGHT)
+                    continue
+                
+                # Kiểm tra đã tìm thấy line lần đầu chưa
+                if not self.initial_line_found:
+                    rospy.logwarn("⚠️ Chưa tìm thấy line lần đầu, không thể LINE_VALIDATION. Chuyển về DRIVING_STRAIGHT")
+                    self._set_state(RobotState.DRIVING_STRAIGHT)
+                    continue
+                
                 if self.latest_image is None:
                     rospy.logwarn("LINE_VALIDATION: Chờ dữ liệu camera...")
-                    self.robot.stop()
-                    rate.sleep()
-                    continue
-
-                # Kiểm tra cờ che camera trước khi validation
-                if not self.check_flag_status_and_wait():
-                    rospy.logwarn_throttle(3, "🚩 LINE_VALIDATION: Dừng do cờ che camera...")
                     self.robot.stop()
                     rate.sleep()
                     continue
@@ -766,7 +659,6 @@ class JetBotController:
                 
                 if line_center_x is not None:
                     rospy.loginfo("Đã tìm thấy line mới! Chuyển sang chế độ bám line.")
-                    self.initialize_motion_flags = False
                     self._set_state(RobotState.DRIVING_STRAIGHT)
                     continue
                 
@@ -838,47 +730,24 @@ class JetBotController:
         return None
     
     def _get_line_center(self, image, roi_y, roi_h):
-        """
-        Kiểm tra sự tồn tại và vị trí của vạch kẻ trong một ROI cụ thể với improved detection.
-        Sử dụng multi-method approach để giảm miss detection và false positive.
-        """
-        if image is None: 
-            return None
-            
+        """Kiểm tra sự tồn tại và vị trí của vạch kẻ trong một ROI cụ thể với improved detection."""
+        if image is None: return None
         roi = image[roi_y : roi_y + roi_h, :]
         
-        # === BƯỚC 1: HSV COLOR-BASED DETECTION (PRIMARY METHOD) ===
+        # === BƯỚC 1: HSV COLOR-BASED DETECTION ===
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
         
-        # === BƯỚC 2: ADAPTIVE GRAYSCALE THRESHOLD (IMPROVED BACKUP) ===
+        # === BƯỚC 2: GRAYSCALE THRESHOLD DETECTION (BACKUP METHOD) ===
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # Use THRESH_BINARY_INV to get white pixels for dark lines
+        _, thresh_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
         
-        # Sử dụng adaptive threshold để handle lighting variations
-        adaptive_thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
-        )
-        
-        # Backup với global threshold cho trường hợp extreme
-        _, global_thresh = cv2.threshold(gray, 45, 255, cv2.THRESH_BINARY_INV)
-        
-        # Combine adaptive và global threshold
-        thresh_mask = cv2.bitwise_or(adaptive_thresh, global_thresh)
-        
-        # === BƯỚC 3: COMBINE DETECTION METHODS ===
-        # Ưu tiên HSV detection, fallback to threshold khi cần
+        # === BƯỚC 3: COMBINE BOTH METHODS ===
+        # Use logical OR to combine both detection methods
         combined_mask = cv2.bitwise_or(color_mask, thresh_mask)
         
-        # === BƯỚC 4: MORPHOLOGICAL OPERATIONS TO REDUCE NOISE ===
-        # Remove small noise with opening operation
-        kernel_small = np.ones((3, 3), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_small)
-        
-        # Fill gaps with closing operation  
-        kernel_medium = np.ones((5, 5), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_medium)
-        
-        # === BƯỚC 5: FOCUS MASK - CONCENTRATE ON CENTER REGION ===
+        # === BƯỚC 4: TẠO MẶT NẠ TẬP TRUNG (FOCUS MASK) ===
         focus_mask = np.zeros_like(combined_mask)
         roi_height, roi_width = focus_mask.shape
         
@@ -889,741 +758,34 @@ class JetBotController:
         # Vẽ một hình chữ nhật trắng ở giữa
         cv2.rectangle(focus_mask, (start_x, 0), (end_x, roi_height), 255, -1)
         
-        # === BƯỚC 6: APPLY FOCUS FILTER ===
+        # === BƯỚC 5: KẾT HỢP DETECTION VÀ FOCUS MASK ===
+        # Chỉ giữ lại những pixel trắng nào xuất hiện ở cả detection mask và focus mask
         final_mask = cv2.bitwise_and(combined_mask, focus_mask)
 
-        # (Debug visualization - comment out in production)
+        # (Tùy chọn) Hiển thị mask để debug
         # cv2.imshow("HSV Mask", color_mask)
-        # cv2.imshow("Adaptive Thresh", adaptive_thresh) 
+        # cv2.imshow("Grayscale Mask", thresh_mask)
         # cv2.imshow("Combined Mask", combined_mask)
+        # cv2.imshow("Focus Mask", focus_mask)
         # cv2.imshow("Final Mask", final_mask)
         # cv2.waitKey(1)
 
-        # === BƯỚC 7: CONTOUR ANALYSIS WITH QUALITY CHECKS ===
+        # Tìm contours trên mặt nạ cuối cùng đã được lọc
         _, contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
             return None
+            
+        c = max(contours, key=cv2.contourArea)
         
-        # Sort contours by area and select largest
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-        
-        for c in contours:
-            area = cv2.contourArea(c)
-            
-            # Area threshold check
-            if area < self.SCAN_PIXEL_THRESHOLD:
-                continue
-                
-            # Aspect ratio check to filter out non-line shapes
-            x, y, w, h = cv2.boundingRect(c)
-            aspect_ratio = float(w) / h if h > 0 else 0
-            
-            # Line should be more horizontal than vertical (trong ROI)
-            if aspect_ratio < 0.3:  # Too vertical, skip
-                continue
-                
-            # Solidity check - line should be relatively dense
-            hull = cv2.convexHull(c)
-            hull_area = cv2.contourArea(hull)
-            solidity = float(area) / hull_area if hull_area > 0 else 0
-            
-            if solidity < 0.6:  # Too sparse, likely noise
-                continue
-            
-            # Calculate centroid
-            M = cv2.moments(c)
-            if M["m00"] > 0:
-                centroid_x = int(M["m10"] / M["m00"])
-                
-                # Position sanity check - should be within reasonable range
-                if 0 <= centroid_x < roi_width:
-                    return centroid_x
-                    
-        return None
+        if cv2.contourArea(c) < self.SCAN_PIXEL_THRESHOLD:
+            return None
 
-    def _calculate_intersection_confidence(self, current_line_center, lookahead_line_center):
-        """
-        Tính toán confidence score cho việc phát hiện intersection.
-        Returns: confidence score (0.0 - 1.0), higher = more confident
-        """
-        confidence_factors = []
-        
-        # Factor 1: Line disappearance in lookahead (primary indicator)
-        line_disappearance_score = 0.0
-        if lookahead_line_center is None and current_line_center is not None:
-            line_disappearance_score = 0.6  # Strong indicator
-        elif lookahead_line_center is None and current_line_center is None:
-            line_disappearance_score = 0.3  # Medium (might be complete loss)
-        confidence_factors.append(line_disappearance_score)
-        
-        # Factor 2: Line detection history consistency
-        self.recent_line_detections.append({
-            'current': current_line_center is not None,
-            'lookahead': lookahead_line_center is not None,
-            'timestamp': rospy.get_time()
-        })
-        
-        # Keep only recent detections (sliding window)
-        current_time = rospy.get_time()
-        self.recent_line_detections = [
-            det for det in self.recent_line_detections 
-            if current_time - det['timestamp'] <= self.intersection_temporal_window
-        ]
-        
-        # Limit history size
-        if len(self.recent_line_detections) > self.line_detection_history_size:
-            self.recent_line_detections = self.recent_line_detections[-self.line_detection_history_size:]
-        
-        # Calculate stability score
-        stability_score = 0.0
-        if len(self.recent_line_detections) >= 3:
-            current_detections = sum(1 for det in self.recent_line_detections if det['current'])
-            lookahead_detections = sum(1 for det in self.recent_line_detections if det['lookahead'])
-            
-            # Good pattern: consistent current line, inconsistent lookahead  
-            current_consistency = current_detections / len(self.recent_line_detections)
-            lookahead_inconsistency = 1.0 - (lookahead_detections / len(self.recent_line_detections))
-            
-            if current_consistency > 0.7 and lookahead_inconsistency > 0.5:
-                stability_score = 0.3
-            elif current_consistency > 0.5 and lookahead_inconsistency > 0.3:
-                stability_score = 0.2
-                
-        confidence_factors.append(stability_score)
-        
-        # Factor 3: Temporal consistency (consecutive detection frames)
-        if lookahead_line_center is None:
-            self.intersection_detection_frames += 1
-        else:
-            self.intersection_detection_frames = 0
-            
-        temporal_score = 0.0
-        if self.intersection_detection_frames >= 2:
-            temporal_score = min(0.1 * self.intersection_detection_frames, 0.3)
-        confidence_factors.append(temporal_score)
-        
-        # Combine all factors
-        total_confidence = sum(confidence_factors)
-        
-        # Debug logging
-        if total_confidence > 0.5:
-            rospy.loginfo_throttle(1, f"🎯 Intersection confidence: {total_confidence:.2f} "
-                                 f"(disappear: {line_disappearance_score:.2f}, "
-                                 f"stability: {stability_score:.2f}, "
-                                 f"temporal: {temporal_score:.2f}, frames: {self.intersection_detection_frames})")
-        
-        return total_confidence
-
-    def _is_intersection_detected_with_confidence(self):
-        """
-        Improved intersection detection với confidence-based approach.
-        Returns: (is_detected, confidence_score)
-        """
-        if self.latest_image is None:
-            return False, 0.0
-            
-        # Get current line detection status
-        lookahead_line_center = self._get_line_center(
-            self.latest_image, self.LOOKAHEAD_ROI_Y, self.LOOKAHEAD_ROI_H
-        )
-        execution_line_center = self._get_line_center(
-            self.latest_image, self.ROI_Y, self.ROI_H
-        )
-        
-        # Calculate confidence score
-        confidence = self._calculate_intersection_confidence(
-            execution_line_center, lookahead_line_center
-        )
-        
-        # Update running confidence score with smoothing
-        self.intersection_confidence_score = (
-            0.7 * self.intersection_confidence_score + 0.3 * confidence
-        )
-        
-        # Detection criteria: high confidence AND minimum temporal consistency
-        is_confident_detection = (
-            self.intersection_confidence_score > 0.6 and 
-            self.intersection_detection_frames >= self.min_intersection_confidence
-        )
-        
-        return is_confident_detection, self.intersection_confidence_score
-
-    def _calculate_line_quality_score(self, image, roi_y, roi_h):
-        """
-        Tính toán chất lượng của line detection để validate độ tin cậy.
-        Returns: quality_score (0.0 - 1.0), higher = better quality
-        """
-        if image is None:
-            return 0.0
-            
-        roi = image[roi_y : roi_y + roi_h, :]
-        
-        # === QUALITY FACTOR 1: CONTOUR PROPERTIES ===
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
-        
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        adaptive_thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
-        )
-        
-        combined_mask = cv2.bitwise_or(color_mask, adaptive_thresh)
-        kernel = np.ones((3, 3), np.uint8)
-        cleaned_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
-        
-        _, contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return 0.0
-        
-        # Find the largest contour (assumed to be the main line)
-        largest_contour = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(largest_contour)
-        
-        # Quality score factors
-        quality_factors = []
-        
-        # Factor 1: Area adequacy (not too small, not too large)
-        roi_area = roi.shape[0] * roi.shape[1]
-        area_ratio = area / roi_area
-        if 0.05 <= area_ratio <= 0.4:  # Reasonable line coverage
-            area_score = 0.3
-        elif 0.02 <= area_ratio <= 0.6:  # Acceptable range
-            area_score = 0.2
-        else:
-            area_score = 0.0
-        quality_factors.append(area_score)
-        
-        # Factor 2: Contour solidity (how filled the shape is)
-        hull = cv2.convexHull(largest_contour)
-        hull_area = cv2.contourArea(hull)
-        solidity = float(area) / hull_area if hull_area > 0 else 0
-        
-        if solidity >= 0.8:
-            solidity_score = 0.25
-        elif solidity >= 0.6:
-            solidity_score = 0.15
-        else:
-            solidity_score = 0.0
-        quality_factors.append(solidity_score)
-        
-        # Factor 3: Aspect ratio (lines should be somewhat horizontal)
-        x, y, w, h = cv2.boundingRect(largest_contour)
-        aspect_ratio = float(w) / h if h > 0 else 0
-        
-        if aspect_ratio >= 2.0:  # Good horizontal line
-            aspect_score = 0.2
-        elif aspect_ratio >= 1.0:  # Acceptable
-            aspect_score = 0.1
-        else:
-            aspect_score = 0.0
-        quality_factors.append(aspect_score)
-        
-        # Factor 4: Position stability (centroid should be reasonably centered)
-        M = cv2.moments(largest_contour)
+        M = cv2.moments(c)
         if M["m00"] > 0:
-            centroid_x = int(M["m10"] / M["m00"])
-            roi_width = roi.shape[1]
-            
-            # Distance from center
-            center_distance = abs(centroid_x - roi_width // 2) / (roi_width // 2)
-            
-            if center_distance <= 0.3:  # Very centered
-                position_score = 0.15
-            elif center_distance <= 0.6:  # Reasonably centered
-                position_score = 0.1
-            else:
-                position_score = 0.0
-        else:
-            position_score = 0.0
-        quality_factors.append(position_score)
-        
-        # Factor 5: Edge consistency (check for clean edges)
-        perimeter = cv2.arcLength(largest_contour, True)
-        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-        
-        # Lines should have low circularity (more elongated)
-        if circularity <= 0.2:
-            edge_score = 0.1
-        elif circularity <= 0.4:
-            edge_score = 0.05
-        else:
-            edge_score = 0.0
-        quality_factors.append(edge_score)
-        
-        total_quality = sum(quality_factors)
-        return min(total_quality, 1.0)  # Cap at 1.0
-
-    def _is_line_detected_and_stable(self, image):
-        """
-        Enhanced line detection với quality validation và stability check.
-        Returns: (is_detected, line_center, quality_score)
-        """
-        if image is None:
-            return False, None, 0.0
-            
-        # Get basic line center
-        line_center = self._get_line_center(image, self.ROI_Y, self.ROI_H)
-        
-        if line_center is None:
-            return False, None, 0.0
-        
-        # Calculate quality score
-        quality_score = self._calculate_line_quality_score(image, self.ROI_Y, self.ROI_H)
-        
-        # Check if quality meets minimum threshold
-        min_quality_threshold = 0.4  # Minimum acceptable quality
-        is_high_quality = quality_score >= min_quality_threshold
-        
-        # Position validation
-        image_width = image.shape[1]
-        is_position_valid = self._is_line_in_valid_range(image)
-        
-        # Combined validation
-        is_stable_detection = is_high_quality and is_position_valid
-        
-        # Debug logging for quality issues
-        if line_center is not None and not is_stable_detection:
-            rospy.logwarn_throttle(2, f"⚠️ Line detected but quality low: "
-                                 f"quality={quality_score:.2f}, position_valid={is_position_valid}")
-        
-        return is_stable_detection, line_center, quality_score
-
-    def _optimize_detection_parameters(self, image):
-        """
-        Tự động điều chỉnh parameters dựa trên điều kiện ánh sáng hiện tại.
-        Giúp cải thiện detection accuracy trong các điều kiện khác nhau.
-        """
-        if image is None:
-            return
-            
-        # Analyze image lighting conditions
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        mean_brightness = np.mean(gray)
-        brightness_std = np.std(gray)
-        
-        # Auto-adjust thresholds based on lighting
-        if mean_brightness < 80:  # Low light conditions
-            # Lower thresholds for dark environments
-            self.SCAN_PIXEL_THRESHOLD = max(300, int(self.SCAN_PIXEL_THRESHOLD * 0.8))
-            rospy.loginfo_throttle(10, f"🌙 Low light detected (brightness={mean_brightness:.1f}), lowering thresholds")
-        elif mean_brightness > 180:  # Bright conditions
-            # Higher thresholds for bright environments
-            self.SCAN_PIXEL_THRESHOLD = min(1000, int(self.SCAN_PIXEL_THRESHOLD * 1.2))
-            rospy.loginfo_throttle(10, f"☀️ Bright light detected (brightness={mean_brightness:.1f}), raising thresholds")
-        
-        # Adjust ROI based on noise levels
-        if brightness_std > 50:  # High noise environment
-            # Use more focused ROI in noisy conditions
-            self.ROI_CENTER_WIDTH_PERCENT = max(0.4, self.ROI_CENTER_WIDTH_PERCENT * 0.9)
-            rospy.loginfo_throttle(15, f"📸 High noise detected (std={brightness_std:.1f}), focusing ROI")
-        else:
-            # Can use wider ROI in clean conditions
-            self.ROI_CENTER_WIDTH_PERCENT = min(0.8, self.ROI_CENTER_WIDTH_PERCENT * 1.05)
-
-    def _temporal_filter_line_detection(self, current_center, quality_score):
-        """
-        Apply temporal smoothing to line detection để giảm jitter và noise.
-        Returns: filtered_center, filtered_quality
-        """
-        # Initialize history if not exists
-        if not hasattr(self, 'line_detection_history'):
-            self.line_detection_history = []
-            
-        current_time = rospy.get_time()
-        
-        # Add current detection to history
-        detection_entry = {
-            'center': current_center,
-            'quality': quality_score,
-            'timestamp': current_time
-        }
-        self.line_detection_history.append(detection_entry)
-        
-        # Keep only recent detections (last 1 second)
-        temporal_window = 1.0
-        self.line_detection_history = [
-            entry for entry in self.line_detection_history
-            if current_time - entry['timestamp'] <= temporal_window
-        ]
-        
-        # Limit history size
-        if len(self.line_detection_history) > 10:
-            self.line_detection_history = self.line_detection_history[-10:]
-        
-        # If we don't have enough history, return current values
-        if len(self.line_detection_history) < 3:
-            return current_center, quality_score
-        
-        # Calculate temporal filtered values
-        valid_centers = [entry['center'] for entry in self.line_detection_history if entry['center'] is not None]
-        
-        if len(valid_centers) == 0:
-            return current_center, quality_score
-            
-        # Weighted average with more recent detections having higher weight
-        weights = np.linspace(0.5, 1.0, len(valid_centers))
-        weights = weights / np.sum(weights)  # Normalize
-        
-        filtered_center = int(np.average(valid_centers, weights=weights))
-        
-        # Filter quality score as well
-        qualities = [entry['quality'] for entry in self.line_detection_history]
-        filtered_quality = np.average(qualities, weights=np.linspace(0.5, 1.0, len(qualities)))
-        
-        return filtered_center, filtered_quality
-
-    def _enhanced_camera_check(self):
-        """
-        Comprehensive camera check kết hợp tất cả improvements để optimize accuracy.
-        Returns: (line_detected, line_center, confidence, quality)
-        """
-        if self.latest_image is None:
-            return False, None, 0.0, 0.0
-        
-        # Step 1: Optimize parameters based on current conditions
-        self._optimize_detection_parameters(self.latest_image)
-        
-        # Step 2: Enhanced line detection with quality checks
-        is_stable, line_center, quality_score = self._is_line_detected_and_stable(self.latest_image)
-        
-        # Step 3: Apply temporal filtering for stability
-        if line_center is not None:
-            filtered_center, filtered_quality = self._temporal_filter_line_detection(line_center, quality_score)
-        else:
-            filtered_center, filtered_quality = line_center, quality_score
-        
-        # Step 4: Calculate overall confidence
-        confidence_score = 0.0
-        if is_stable:
-            # Combine quality and temporal consistency for confidence
-            temporal_consistency = 1.0 if len(getattr(self, 'line_detection_history', [])) >= 3 else 0.5
-            confidence_score = min(filtered_quality * temporal_consistency, 1.0)
-        
-        # Step 5: Final validation
-        final_detection = (
-            is_stable and 
-            confidence_score > 0.3 and
-            filtered_center is not None
-        )
-        
-        return final_detection, filtered_center, confidence_score, filtered_quality
-
-    def get_optimized_line_detection(self):
-        """
-        Main method để lấy optimized line detection với tất cả improvements.
-        Sử dụng method này thay thế cho _get_line_center trong main loop.
-        
-        Returns: dict containing:
-        - 'detected': bool - có phát hiện line không
-        - 'center': int/None - vị trí center của line
-        - 'confidence': float - độ tin cậy (0.0-1.0)
-        - 'quality': float - chất lượng detection (0.0-1.0)
-        - 'stable': bool - line có stable không
-        """
-        detected, center, confidence, quality = self._enhanced_camera_check()
-        
-        return {
-            'detected': detected,
-            'center': center, 
-            'confidence': confidence,
-            'quality': quality,
-            'stable': detected and confidence > 0.5
-        }
-
-    def _detect_crossroad_by_camera(self, image):
-        """
-        Phát hiện giao lộ ngã tư bằng camera thông qua phân tích multiple line directions.
-        Returns: (is_crossroad, confidence_score, detected_directions)
-        """
-        if image is None:
-            return False, 0.0, []
-            
-        # Phân tích các vùng ROI khác nhau để tìm lines ở nhiều hướng
-        height, width = image.shape[:2]
-        
-        # Define multiple ROI regions để detect lines ở các hướng khác nhau
-        roi_configs = [
-            # Main forward ROI (đã có)
-            {'name': 'forward', 'y': self.ROI_Y, 'h': self.ROI_H, 'x': 0, 'w': width},
-            
-            # Left side ROI - detect line rẽ trái
-            {'name': 'left', 'y': height//3, 'h': height//3, 'x': 0, 'w': width//3},
-            
-            # Right side ROI - detect line rẽ phải  
-            {'name': 'right', 'y': height//3, 'h': height//3, 'x': 2*width//3, 'w': width//3},
-            
-            # Upper ROI - detect line phía trước xa
-            {'name': 'upper', 'y': height//4, 'h': height//4, 'x': width//4, 'w': width//2},
-        ]
-        
-        detected_directions = []
-        total_line_mass = 0
-        
-        for roi_config in roi_configs:
-            roi_result = self._analyze_roi_for_lines(image, roi_config)
-            if roi_result['has_line']:
-                detected_directions.append({
-                    'direction': roi_config['name'],
-                    'confidence': roi_result['confidence'],
-                    'line_mass': roi_result['line_mass'],
-                    'center': roi_result['center']
-                })
-                total_line_mass += roi_result['line_mass']
-        
-        # Crossroad detection logic
-        is_crossroad = False
-        confidence_score = 0.0
-        
-        # Phải có ít nhất 3 directions để coi là crossroad  
-        if len(detected_directions) >= 3:
-            # Check if we have good coverage of different directions
-            direction_names = [d['direction'] for d in detected_directions]
-            
-            # Perfect crossroad: forward + left + right + optional upper
-            if 'forward' in direction_names and 'left' in direction_names and 'right' in direction_names:
-                is_crossroad = True
-                base_confidence = 0.8
-                
-                # Bonus if upper is also detected (T-junction vs full crossroad)
-                if 'upper' in direction_names:
-                    confidence_score = min(base_confidence + 0.1, 1.0)
-                else:
-                    confidence_score = base_confidence
-                    
-                # Adjust confidence based on line quality
-                avg_line_confidence = np.mean([d['confidence'] for d in detected_directions])
-                confidence_score *= avg_line_confidence
-                
-            # Alternative: 3 directions including forward
-            elif 'forward' in direction_names and len(direction_names) >= 3:
-                is_crossroad = True
-                confidence_score = 0.6 * np.mean([d['confidence'] for d in detected_directions])
-        
-        # Additional validation: line mass distribution
-        if is_crossroad and total_line_mass > 0:
-            # Check if line mass is reasonably distributed (not concentrated in one area)
-            mass_distribution = [d['line_mass'] / total_line_mass for d in detected_directions]
-            distribution_score = 1.0 - np.std(mass_distribution)  # Lower std = better distribution
-            confidence_score *= max(0.5, distribution_score)
-        
-        return is_crossroad, confidence_score, detected_directions
-
-    def _analyze_roi_for_lines(self, image, roi_config):
-        """
-        Phân tích một ROI cụ thể để tìm lines và tính chất lượng.
-        Returns: dict with has_line, confidence, line_mass, center
-        """
-        y, h = roi_config['y'], roi_config['h'] 
-        x, w = roi_config.get('x', 0), roi_config.get('w', image.shape[1])
-        
-        # Extract ROI
-        roi = image[y:y+h, x:x+w]
-        
-        # HSV-based line detection
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
-        
-        # Adaptive thresholding backup
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        adaptive_thresh = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
-        )
-        
-        # Combine detection methods
-        combined_mask = cv2.bitwise_or(color_mask, adaptive_thresh)
-        
-        # Morphological operations
-        kernel = np.ones((3, 3), np.uint8)
-        cleaned_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-        
-        # Find contours
-        _, contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return {'has_line': False, 'confidence': 0.0, 'line_mass': 0, 'center': None}
-        
-        # Analyze largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(largest_contour)
-        
-        # Calculate confidence based on multiple factors
-        roi_area = h * w
-        area_ratio = area / roi_area
-        
-        # Has line if area is significant
-        has_line = area_ratio > 0.02 and area > 100
-        
-        # Calculate confidence score
-        confidence = 0.0
-        if has_line:
-            # Area factor
-            if 0.05 <= area_ratio <= 0.4:
-                area_confidence = 0.8
-            elif 0.02 <= area_ratio <= 0.6:
-                area_confidence = 0.5
-            else:
-                area_confidence = 0.3
-            
-            # Solidity factor
-            hull = cv2.convexHull(largest_contour)
-            hull_area = cv2.contourArea(hull)
-            solidity = float(area) / hull_area if hull_area > 0 else 0
-            solidity_confidence = min(solidity * 2, 1.0)
-            
-            confidence = (area_confidence + solidity_confidence) / 2
-        
-        # Calculate line center
-        center = None
-        if has_line:
-            M = cv2.moments(largest_contour)
-            if M["m00"] > 0:
-                center_x = int(M["m10"] / M["m00"]) + x  # Adjust for ROI offset
-                center_y = int(M["m01"] / M["m00"]) + y
-                center = (center_x, center_y)
-        
-        return {
-            'has_line': has_line,
-            'confidence': confidence,
-            'line_mass': area,
-            'center': center
-        }
-
-    def _enhanced_crossroad_detection(self):
-        """
-        Tổng hợp method phát hiện crossroad kết hợp camera và confidence tracking.
-        Returns: (is_crossroad, confidence, method_used)
-        """
-        if self.latest_image is None:
-            return False, 0.0, "no_image"
-        
-        # Method 1: Camera-based crossroad detection
-        is_crossroad_cam, cam_confidence, directions = self._detect_crossroad_by_camera(self.latest_image)
-        
-        # Method 2: Enhanced lookahead disappearance (existing method)
-        is_intersection_detected, intersection_confidence = self._is_intersection_detected_with_confidence()
-        
-        # Method 3: LiDAR validation (if available)
-        lidar_detection = False
-        if hasattr(self, 'detector') and self.detector:
-            lidar_detection = self.detector.process_detection() if hasattr(self.detector, 'process_detection') else False
-        
-        # Combine methods with weighted confidence
-        final_confidence = 0.0
-        method_used = []
-        
-        # Camera crossroad detection (high weight for crossroads)
-        if is_crossroad_cam:
-            final_confidence += cam_confidence * 0.6
-            method_used.append(f"camera_crossroad({cam_confidence:.2f})")
-            
-        # Traditional intersection detection (medium weight)
-        if is_intersection_detected:
-            final_confidence += intersection_confidence * 0.3
-            method_used.append(f"lookahead_disappear({intersection_confidence:.2f})")
-            
-        # LiDAR confirmation (bonus weight)
-        if lidar_detection:
-            final_confidence += 0.2
-            method_used.append("lidar_confirm")
-        
-        # Final decision
-        is_final_crossroad = final_confidence > 0.5
-        method_description = " + ".join(method_used) if method_used else "none"
-        
-        # Debug logging
-        if is_final_crossroad:
-            rospy.loginfo(f"🎯 CROSSROAD DETECTED! Confidence: {final_confidence:.2f}, Methods: {method_description}")
-            if directions:
-                direction_summary = [f"{d['direction']}({d['confidence']:.2f})" for d in directions]
-                rospy.loginfo(f"📍 Detected directions: {', '.join(direction_summary)}")
-        
-        return is_final_crossroad, final_confidence, method_description
-
-    def visualize_crossroad_detection(self, image, detected_directions):
-        """
-        Visualize crossroad detection results for debugging.
-        """
-        if image is None or not detected_directions:
-            return image
-            
-        # Create a copy for visualization
-        vis_image = image.copy()
-        
-        # Draw detected lines and directions
-        for direction in detected_directions:
-            if direction['center']:
-                center = direction['center']
-                confidence = direction['confidence']
-                direction_name = direction['direction']
-                
-                # Color mapping for different directions
-                color_map = {
-                    'forward': (0, 255, 0),    # Green
-                    'left': (255, 0, 0),       # Blue
-                    'right': (0, 0, 255),      # Red
-                    'upper': (255, 255, 0)     # Cyan
-                }
-                
-                color = color_map.get(direction_name, (255, 255, 255))
-                
-                # Draw circle at line center
-                cv2.circle(vis_image, center, 8, color, -1)
-                
-                # Draw direction label
-                label = f"{direction_name}: {confidence:.2f}"
-                cv2.putText(vis_image, label, (center[0] - 50, center[1] - 15), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        
-        # Draw ROI rectangles for reference
-        height, width = image.shape[:2]
-        roi_configs = [
-            {'name': 'forward', 'y': self.ROI_Y, 'h': self.ROI_H, 'x': 0, 'w': width, 'color': (0, 255, 0)},
-            {'name': 'left', 'y': height//3, 'h': height//3, 'x': 0, 'w': width//3, 'color': (255, 0, 0)},
-            {'name': 'right', 'y': height//3, 'h': height//3, 'x': 2*width//3, 'w': width//3, 'color': (0, 0, 255)},
-            {'name': 'upper', 'y': height//4, 'h': height//4, 'x': width//4, 'w': width//2, 'color': (255, 255, 0)},
-        ]
-        
-        for roi in roi_configs:
-            cv2.rectangle(vis_image, (roi['x'], roi['y']), 
-                         (roi['x'] + roi['w'], roi['y'] + roi['h']), roi['color'], 2)
-            cv2.putText(vis_image, roi['name'], (roi['x'] + 5, roi['y'] + 15),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, roi['color'], 1)
-        
-        return vis_image
-
-    def debug_crossroad_detection(self):
-        """
-        Debug method để test crossroad detection và hiển thị kết quả.
-        Gọi method này để kiểm tra crossroad detection.
-        """
-        if self.latest_image is None:
-            rospy.logwarn("Không có image để debug crossroad detection")
-            return
-            
-        # Run crossroad detection
-        is_crossroad, confidence, directions = self._detect_crossroad_by_camera(self.latest_image)
-        
-        rospy.loginfo(f"🔍 DEBUG - Crossroad Detection:")
-        rospy.loginfo(f"  Is Crossroad: {is_crossroad}")
-        rospy.loginfo(f"  Confidence: {confidence:.3f}")
-        rospy.loginfo(f"  Directions detected: {len(directions)}")
-        
-        for i, direction in enumerate(directions):
-            rospy.loginfo(f"    {i+1}. {direction['direction']}: confidence={direction['confidence']:.3f}, mass={direction['line_mass']}")
-        
-        # Create visualization
-        vis_image = self.visualize_crossroad_detection(self.latest_image, directions)
-        
-        # Save debug image (optional)
-        debug_filename = f"/tmp/crossroad_debug_{int(rospy.get_time())}.jpg"
-        cv2.imwrite(debug_filename, vis_image)
-        rospy.loginfo(f"💾 Debug image saved: {debug_filename}")
-        
-        # Show image (uncomment for live debugging)
-        # cv2.imshow("Crossroad Detection Debug", vis_image)
-        # cv2.waitKey(1)
+            # Quan trọng: Trọng tâm bây giờ được tính toán chỉ dựa trên vạch kẻ trong khu vực trung tâm
+            return int(M["m10"] / M["m00"])
+        return None
     
     def _is_line_in_valid_range(self, image):
         """
