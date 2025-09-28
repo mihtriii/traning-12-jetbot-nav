@@ -65,6 +65,14 @@ class JetBotController:
         self.waiting_for_lidar_confirmation = False
         self.lidar_confirmation_timeout = 4.0  # 4 seconds to wait for LiDAR
         
+        # Enhanced intersection detection with confidence tracking
+        self.intersection_confidence_score = 0.0
+        self.recent_line_detections = []  # Ring buffer for line detection history
+        self.line_detection_history_size = 10
+        self.intersection_detection_frames = 0
+        self.min_intersection_confidence = 3  # Min consecutive frames needed
+        self.intersection_temporal_window = 1.0  # Time window for detection stability
+        
         rospy.Subscriber('/scan', LaserScan, self.detector.callback)
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
         rospy.loginfo("Đã đăng ký vào các topic /scan và /csi_cam_0/image_raw.")
@@ -632,12 +640,12 @@ class JetBotController:
                         self.handle_intersection()
                     continue # Bắt đầu vòng lặp mới với trạng thái mới
 
-                # --- BƯỚC 2: LOGIC "NHÌN XA HƠN" VỚI ROI DỰ BÁO ---
-                # Nếu LiDAR im lặng, kiểm tra xem vạch kẻ có sắp biến mất ở phía xa không.
-                lookahead_line_center = self._get_line_center(self.latest_image, self.LOOKAHEAD_ROI_Y, self.LOOKAHEAD_ROI_H)
+                # --- BƯỚC 2: LOGIC "NHÌN XA HƠN" VỚI ROI DỰ BÁO - IMPROVED ---
+                # Sử dụng confidence-based intersection detection thay vì simple check
+                is_intersection_detected, confidence_score = self._is_intersection_detected_with_confidence()
 
-                if lookahead_line_center is None:
-                    rospy.logwarn("SỰ KIỆN (Dự báo): Vạch kẻ đường biến mất ở phía xa. Chuẩn bị vào giao lộ.")
+                if is_intersection_detected:
+                    rospy.logwarn(f"SỰ KIỆN (Dự báo với Confidence): Intersection detected với confidence {confidence_score:.2f}. Chuẩn bị vào giao lộ.")
                     # Hành động phòng ngừa: chuyển sang trạng thái đi thẳng vào giao lộ.
                     self._set_state(RobotState.APPROACHING_INTERSECTION)
                     time.sleep(0.3)
@@ -828,24 +836,47 @@ class JetBotController:
         return None
     
     def _get_line_center(self, image, roi_y, roi_h):
-        """Kiểm tra sự tồn tại và vị trí của vạch kẻ trong một ROI cụ thể với improved detection."""
-        if image is None: return None
+        """
+        Kiểm tra sự tồn tại và vị trí của vạch kẻ trong một ROI cụ thể với improved detection.
+        Sử dụng multi-method approach để giảm miss detection và false positive.
+        """
+        if image is None: 
+            return None
+            
         roi = image[roi_y : roi_y + roi_h, :]
         
-        # === BƯỚC 1: HSV COLOR-BASED DETECTION ===
+        # === BƯỚC 1: HSV COLOR-BASED DETECTION (PRIMARY METHOD) ===
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
         
-        # === BƯỚC 2: GRAYSCALE THRESHOLD DETECTION (BACKUP METHOD) ===
+        # === BƯỚC 2: ADAPTIVE GRAYSCALE THRESHOLD (IMPROVED BACKUP) ===
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        # Use THRESH_BINARY_INV to get white pixels for dark lines
-        _, thresh_mask = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY_INV)
         
-        # === BƯỚC 3: COMBINE BOTH METHODS ===
-        # Use logical OR to combine both detection methods
+        # Sử dụng adaptive threshold để handle lighting variations
+        adaptive_thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Backup với global threshold cho trường hợp extreme
+        _, global_thresh = cv2.threshold(gray, 45, 255, cv2.THRESH_BINARY_INV)
+        
+        # Combine adaptive và global threshold
+        thresh_mask = cv2.bitwise_or(adaptive_thresh, global_thresh)
+        
+        # === BƯỚC 3: COMBINE DETECTION METHODS ===
+        # Ưu tiên HSV detection, fallback to threshold khi cần
         combined_mask = cv2.bitwise_or(color_mask, thresh_mask)
         
-        # === BƯỚC 4: TẠO MẶT NẠ TẬP TRUNG (FOCUS MASK) ===
+        # === BƯỚC 4: MORPHOLOGICAL OPERATIONS TO REDUCE NOISE ===
+        # Remove small noise with opening operation
+        kernel_small = np.ones((3, 3), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel_small)
+        
+        # Fill gaps with closing operation  
+        kernel_medium = np.ones((5, 5), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_medium)
+        
+        # === BƯỚC 5: FOCUS MASK - CONCENTRATE ON CENTER REGION ===
         focus_mask = np.zeros_like(combined_mask)
         roi_height, roi_width = focus_mask.shape
         
@@ -856,34 +887,448 @@ class JetBotController:
         # Vẽ một hình chữ nhật trắng ở giữa
         cv2.rectangle(focus_mask, (start_x, 0), (end_x, roi_height), 255, -1)
         
-        # === BƯỚC 5: KẾT HỢP DETECTION VÀ FOCUS MASK ===
-        # Chỉ giữ lại những pixel trắng nào xuất hiện ở cả detection mask và focus mask
+        # === BƯỚC 6: APPLY FOCUS FILTER ===
         final_mask = cv2.bitwise_and(combined_mask, focus_mask)
 
-        # (Tùy chọn) Hiển thị mask để debug
+        # (Debug visualization - comment out in production)
         # cv2.imshow("HSV Mask", color_mask)
-        # cv2.imshow("Grayscale Mask", thresh_mask)
+        # cv2.imshow("Adaptive Thresh", adaptive_thresh) 
         # cv2.imshow("Combined Mask", combined_mask)
-        # cv2.imshow("Focus Mask", focus_mask)
         # cv2.imshow("Final Mask", final_mask)
         # cv2.waitKey(1)
 
-        # Tìm contours trên mặt nạ cuối cùng đã được lọc
+        # === BƯỚC 7: CONTOUR ANALYSIS WITH QUALITY CHECKS ===
         _, contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         if not contours:
             return None
-            
-        c = max(contours, key=cv2.contourArea)
         
-        if cv2.contourArea(c) < self.SCAN_PIXEL_THRESHOLD:
-            return None
-
-        M = cv2.moments(c)
-        if M["m00"] > 0:
-            # Quan trọng: Trọng tâm bây giờ được tính toán chỉ dựa trên vạch kẻ trong khu vực trung tâm
-            return int(M["m10"] / M["m00"])
+        # Sort contours by area and select largest
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        
+        for c in contours:
+            area = cv2.contourArea(c)
+            
+            # Area threshold check
+            if area < self.SCAN_PIXEL_THRESHOLD:
+                continue
+                
+            # Aspect ratio check to filter out non-line shapes
+            x, y, w, h = cv2.boundingRect(c)
+            aspect_ratio = float(w) / h if h > 0 else 0
+            
+            # Line should be more horizontal than vertical (trong ROI)
+            if aspect_ratio < 0.3:  # Too vertical, skip
+                continue
+                
+            # Solidity check - line should be relatively dense
+            hull = cv2.convexHull(c)
+            hull_area = cv2.contourArea(hull)
+            solidity = float(area) / hull_area if hull_area > 0 else 0
+            
+            if solidity < 0.6:  # Too sparse, likely noise
+                continue
+            
+            # Calculate centroid
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                centroid_x = int(M["m10"] / M["m00"])
+                
+                # Position sanity check - should be within reasonable range
+                if 0 <= centroid_x < roi_width:
+                    return centroid_x
+                    
         return None
+
+    def _calculate_intersection_confidence(self, current_line_center, lookahead_line_center):
+        """
+        Tính toán confidence score cho việc phát hiện intersection.
+        Returns: confidence score (0.0 - 1.0), higher = more confident
+        """
+        confidence_factors = []
+        
+        # Factor 1: Line disappearance in lookahead (primary indicator)
+        line_disappearance_score = 0.0
+        if lookahead_line_center is None and current_line_center is not None:
+            line_disappearance_score = 0.6  # Strong indicator
+        elif lookahead_line_center is None and current_line_center is None:
+            line_disappearance_score = 0.3  # Medium (might be complete loss)
+        confidence_factors.append(line_disappearance_score)
+        
+        # Factor 2: Line detection history consistency
+        self.recent_line_detections.append({
+            'current': current_line_center is not None,
+            'lookahead': lookahead_line_center is not None,
+            'timestamp': rospy.get_time()
+        })
+        
+        # Keep only recent detections (sliding window)
+        current_time = rospy.get_time()
+        self.recent_line_detections = [
+            det for det in self.recent_line_detections 
+            if current_time - det['timestamp'] <= self.intersection_temporal_window
+        ]
+        
+        # Limit history size
+        if len(self.recent_line_detections) > self.line_detection_history_size:
+            self.recent_line_detections = self.recent_line_detections[-self.line_detection_history_size:]
+        
+        # Calculate stability score
+        stability_score = 0.0
+        if len(self.recent_line_detections) >= 3:
+            current_detections = sum(1 for det in self.recent_line_detections if det['current'])
+            lookahead_detections = sum(1 for det in self.recent_line_detections if det['lookahead'])
+            
+            # Good pattern: consistent current line, inconsistent lookahead  
+            current_consistency = current_detections / len(self.recent_line_detections)
+            lookahead_inconsistency = 1.0 - (lookahead_detections / len(self.recent_line_detections))
+            
+            if current_consistency > 0.7 and lookahead_inconsistency > 0.5:
+                stability_score = 0.3
+            elif current_consistency > 0.5 and lookahead_inconsistency > 0.3:
+                stability_score = 0.2
+                
+        confidence_factors.append(stability_score)
+        
+        # Factor 3: Temporal consistency (consecutive detection frames)
+        if lookahead_line_center is None:
+            self.intersection_detection_frames += 1
+        else:
+            self.intersection_detection_frames = 0
+            
+        temporal_score = 0.0
+        if self.intersection_detection_frames >= 2:
+            temporal_score = min(0.1 * self.intersection_detection_frames, 0.3)
+        confidence_factors.append(temporal_score)
+        
+        # Combine all factors
+        total_confidence = sum(confidence_factors)
+        
+        # Debug logging
+        if total_confidence > 0.5:
+            rospy.loginfo_throttle(1, f"🎯 Intersection confidence: {total_confidence:.2f} "
+                                 f"(disappear: {line_disappearance_score:.2f}, "
+                                 f"stability: {stability_score:.2f}, "
+                                 f"temporal: {temporal_score:.2f}, frames: {self.intersection_detection_frames})")
+        
+        return total_confidence
+
+    def _is_intersection_detected_with_confidence(self):
+        """
+        Improved intersection detection với confidence-based approach.
+        Returns: (is_detected, confidence_score)
+        """
+        if self.latest_image is None:
+            return False, 0.0
+            
+        # Get current line detection status
+        lookahead_line_center = self._get_line_center(
+            self.latest_image, self.LOOKAHEAD_ROI_Y, self.LOOKAHEAD_ROI_H
+        )
+        execution_line_center = self._get_line_center(
+            self.latest_image, self.ROI_Y, self.ROI_H
+        )
+        
+        # Calculate confidence score
+        confidence = self._calculate_intersection_confidence(
+            execution_line_center, lookahead_line_center
+        )
+        
+        # Update running confidence score with smoothing
+        self.intersection_confidence_score = (
+            0.7 * self.intersection_confidence_score + 0.3 * confidence
+        )
+        
+        # Detection criteria: high confidence AND minimum temporal consistency
+        is_confident_detection = (
+            self.intersection_confidence_score > 0.6 and 
+            self.intersection_detection_frames >= self.min_intersection_confidence
+        )
+        
+        return is_confident_detection, self.intersection_confidence_score
+
+    def _calculate_line_quality_score(self, image, roi_y, roi_h):
+        """
+        Tính toán chất lượng của line detection để validate độ tin cậy.
+        Returns: quality_score (0.0 - 1.0), higher = better quality
+        """
+        if image is None:
+            return 0.0
+            
+        roi = image[roi_y : roi_y + roi_h, :]
+        
+        # === QUALITY FACTOR 1: CONTOUR PROPERTIES ===
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        adaptive_thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        combined_mask = cv2.bitwise_or(color_mask, adaptive_thresh)
+        kernel = np.ones((3, 3), np.uint8)
+        cleaned_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        
+        _, contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return 0.0
+        
+        # Find the largest contour (assumed to be the main line)
+        largest_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_contour)
+        
+        # Quality score factors
+        quality_factors = []
+        
+        # Factor 1: Area adequacy (not too small, not too large)
+        roi_area = roi.shape[0] * roi.shape[1]
+        area_ratio = area / roi_area
+        if 0.05 <= area_ratio <= 0.4:  # Reasonable line coverage
+            area_score = 0.3
+        elif 0.02 <= area_ratio <= 0.6:  # Acceptable range
+            area_score = 0.2
+        else:
+            area_score = 0.0
+        quality_factors.append(area_score)
+        
+        # Factor 2: Contour solidity (how filled the shape is)
+        hull = cv2.convexHull(largest_contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = float(area) / hull_area if hull_area > 0 else 0
+        
+        if solidity >= 0.8:
+            solidity_score = 0.25
+        elif solidity >= 0.6:
+            solidity_score = 0.15
+        else:
+            solidity_score = 0.0
+        quality_factors.append(solidity_score)
+        
+        # Factor 3: Aspect ratio (lines should be somewhat horizontal)
+        x, y, w, h = cv2.boundingRect(largest_contour)
+        aspect_ratio = float(w) / h if h > 0 else 0
+        
+        if aspect_ratio >= 2.0:  # Good horizontal line
+            aspect_score = 0.2
+        elif aspect_ratio >= 1.0:  # Acceptable
+            aspect_score = 0.1
+        else:
+            aspect_score = 0.0
+        quality_factors.append(aspect_score)
+        
+        # Factor 4: Position stability (centroid should be reasonably centered)
+        M = cv2.moments(largest_contour)
+        if M["m00"] > 0:
+            centroid_x = int(M["m10"] / M["m00"])
+            roi_width = roi.shape[1]
+            
+            # Distance from center
+            center_distance = abs(centroid_x - roi_width // 2) / (roi_width // 2)
+            
+            if center_distance <= 0.3:  # Very centered
+                position_score = 0.15
+            elif center_distance <= 0.6:  # Reasonably centered
+                position_score = 0.1
+            else:
+                position_score = 0.0
+        else:
+            position_score = 0.0
+        quality_factors.append(position_score)
+        
+        # Factor 5: Edge consistency (check for clean edges)
+        perimeter = cv2.arcLength(largest_contour, True)
+        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+        
+        # Lines should have low circularity (more elongated)
+        if circularity <= 0.2:
+            edge_score = 0.1
+        elif circularity <= 0.4:
+            edge_score = 0.05
+        else:
+            edge_score = 0.0
+        quality_factors.append(edge_score)
+        
+        total_quality = sum(quality_factors)
+        return min(total_quality, 1.0)  # Cap at 1.0
+
+    def _is_line_detected_and_stable(self, image):
+        """
+        Enhanced line detection với quality validation và stability check.
+        Returns: (is_detected, line_center, quality_score)
+        """
+        if image is None:
+            return False, None, 0.0
+            
+        # Get basic line center
+        line_center = self._get_line_center(image, self.ROI_Y, self.ROI_H)
+        
+        if line_center is None:
+            return False, None, 0.0
+        
+        # Calculate quality score
+        quality_score = self._calculate_line_quality_score(image, self.ROI_Y, self.ROI_H)
+        
+        # Check if quality meets minimum threshold
+        min_quality_threshold = 0.4  # Minimum acceptable quality
+        is_high_quality = quality_score >= min_quality_threshold
+        
+        # Position validation
+        image_width = image.shape[1]
+        is_position_valid = self._is_line_in_valid_range(image)
+        
+        # Combined validation
+        is_stable_detection = is_high_quality and is_position_valid
+        
+        # Debug logging for quality issues
+        if line_center is not None and not is_stable_detection:
+            rospy.logwarn_throttle(2, f"⚠️ Line detected but quality low: "
+                                 f"quality={quality_score:.2f}, position_valid={is_position_valid}")
+        
+        return is_stable_detection, line_center, quality_score
+
+    def _optimize_detection_parameters(self, image):
+        """
+        Tự động điều chỉnh parameters dựa trên điều kiện ánh sáng hiện tại.
+        Giúp cải thiện detection accuracy trong các điều kiện khác nhau.
+        """
+        if image is None:
+            return
+            
+        # Analyze image lighting conditions
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mean_brightness = np.mean(gray)
+        brightness_std = np.std(gray)
+        
+        # Auto-adjust thresholds based on lighting
+        if mean_brightness < 80:  # Low light conditions
+            # Lower thresholds for dark environments
+            self.SCAN_PIXEL_THRESHOLD = max(300, int(self.SCAN_PIXEL_THRESHOLD * 0.8))
+            rospy.loginfo_throttle(10, f"🌙 Low light detected (brightness={mean_brightness:.1f}), lowering thresholds")
+        elif mean_brightness > 180:  # Bright conditions
+            # Higher thresholds for bright environments
+            self.SCAN_PIXEL_THRESHOLD = min(1000, int(self.SCAN_PIXEL_THRESHOLD * 1.2))
+            rospy.loginfo_throttle(10, f"☀️ Bright light detected (brightness={mean_brightness:.1f}), raising thresholds")
+        
+        # Adjust ROI based on noise levels
+        if brightness_std > 50:  # High noise environment
+            # Use more focused ROI in noisy conditions
+            self.ROI_CENTER_WIDTH_PERCENT = max(0.4, self.ROI_CENTER_WIDTH_PERCENT * 0.9)
+            rospy.loginfo_throttle(15, f"📸 High noise detected (std={brightness_std:.1f}), focusing ROI")
+        else:
+            # Can use wider ROI in clean conditions
+            self.ROI_CENTER_WIDTH_PERCENT = min(0.8, self.ROI_CENTER_WIDTH_PERCENT * 1.05)
+
+    def _temporal_filter_line_detection(self, current_center, quality_score):
+        """
+        Apply temporal smoothing to line detection để giảm jitter và noise.
+        Returns: filtered_center, filtered_quality
+        """
+        # Initialize history if not exists
+        if not hasattr(self, 'line_detection_history'):
+            self.line_detection_history = []
+            
+        current_time = rospy.get_time()
+        
+        # Add current detection to history
+        detection_entry = {
+            'center': current_center,
+            'quality': quality_score,
+            'timestamp': current_time
+        }
+        self.line_detection_history.append(detection_entry)
+        
+        # Keep only recent detections (last 1 second)
+        temporal_window = 1.0
+        self.line_detection_history = [
+            entry for entry in self.line_detection_history
+            if current_time - entry['timestamp'] <= temporal_window
+        ]
+        
+        # Limit history size
+        if len(self.line_detection_history) > 10:
+            self.line_detection_history = self.line_detection_history[-10:]
+        
+        # If we don't have enough history, return current values
+        if len(self.line_detection_history) < 3:
+            return current_center, quality_score
+        
+        # Calculate temporal filtered values
+        valid_centers = [entry['center'] for entry in self.line_detection_history if entry['center'] is not None]
+        
+        if len(valid_centers) == 0:
+            return current_center, quality_score
+            
+        # Weighted average with more recent detections having higher weight
+        weights = np.linspace(0.5, 1.0, len(valid_centers))
+        weights = weights / np.sum(weights)  # Normalize
+        
+        filtered_center = int(np.average(valid_centers, weights=weights))
+        
+        # Filter quality score as well
+        qualities = [entry['quality'] for entry in self.line_detection_history]
+        filtered_quality = np.average(qualities, weights=np.linspace(0.5, 1.0, len(qualities)))
+        
+        return filtered_center, filtered_quality
+
+    def _enhanced_camera_check(self):
+        """
+        Comprehensive camera check kết hợp tất cả improvements để optimize accuracy.
+        Returns: (line_detected, line_center, confidence, quality)
+        """
+        if self.latest_image is None:
+            return False, None, 0.0, 0.0
+        
+        # Step 1: Optimize parameters based on current conditions
+        self._optimize_detection_parameters(self.latest_image)
+        
+        # Step 2: Enhanced line detection with quality checks
+        is_stable, line_center, quality_score = self._is_line_detected_and_stable(self.latest_image)
+        
+        # Step 3: Apply temporal filtering for stability
+        if line_center is not None:
+            filtered_center, filtered_quality = self._temporal_filter_line_detection(line_center, quality_score)
+        else:
+            filtered_center, filtered_quality = line_center, quality_score
+        
+        # Step 4: Calculate overall confidence
+        confidence_score = 0.0
+        if is_stable:
+            # Combine quality and temporal consistency for confidence
+            temporal_consistency = 1.0 if len(getattr(self, 'line_detection_history', [])) >= 3 else 0.5
+            confidence_score = min(filtered_quality * temporal_consistency, 1.0)
+        
+        # Step 5: Final validation
+        final_detection = (
+            is_stable and 
+            confidence_score > 0.3 and
+            filtered_center is not None
+        )
+        
+        return final_detection, filtered_center, confidence_score, filtered_quality
+
+    def get_optimized_line_detection(self):
+        """
+        Main method để lấy optimized line detection với tất cả improvements.
+        Sử dụng method này thay thế cho _get_line_center trong main loop.
+        
+        Returns: dict containing:
+        - 'detected': bool - có phát hiện line không
+        - 'center': int/None - vị trí center của line
+        - 'confidence': float - độ tin cậy (0.0-1.0)
+        - 'quality': float - chất lượng detection (0.0-1.0)
+        - 'stable': bool - line có stable không
+        """
+        detected, center, confidence, quality = self._enhanced_camera_check()
+        
+        return {
+            'detected': detected,
+            'center': center, 
+            'confidence': confidence,
+            'quality': quality,
+            'stable': detected and confidence > 0.5
+        }
     
     def _is_line_in_valid_range(self, image):
         """
