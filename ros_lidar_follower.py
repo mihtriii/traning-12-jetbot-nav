@@ -1097,7 +1097,7 @@ class JetBotController:
     def reset_robot_to_initial_state(self):
         """Reset robot về trạng thái ban đầu hoàn toàn, bao gồm cả vị trí node."""
         rospy.loginfo("🔄 RESETTING ROBOT TO COMPLETE INITIAL STATE...")
-        
+         
         # Stop robot immediately
         self.robot.stop()
         
