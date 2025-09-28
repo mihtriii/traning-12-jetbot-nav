@@ -185,6 +185,11 @@ class JetBotController:
         self.CROSS_MIN_ASPECT_RATIO = 1.2           # Reduced from 1.5 to 1.2 - catch even thinner cross lines
         self.CROSS_MIN_WIDTH_RATIO = 0.25           # Reduced from 0.3 to 0.25 - catch even shorter cross lines
         self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
+        
+        # Flag detection parameters
+        self.FLAG_RED_LOWER = np.array([0, 100, 100])
+        self.FLAG_RED_UPPER = np.array([10, 255, 255])
+        self.FLAG_COVERAGE_THRESHOLD = 0.3  # 30% of image covered to be considered flag
 
     def initialize_hardware(self):
         try:
@@ -352,6 +357,15 @@ class JetBotController:
         self.detector.start_scanning()
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
+            # ===================================================================
+            # FLAG CHECK: Kiểm tra cờ đỏ - robot chỉ chạy khi không có cờ
+            # ===================================================================
+            if self.latest_image is not None and self.detect_red_flag(self.latest_image):
+                rospy.loginfo("🚩 PHÁT HIỆN CỜ ĐỎ - Robot đang chờ cờ được phất...")
+                self.robot.stop()
+                time.sleep(2.0)  # Hold 2 seconds
+                continue  # Recheck flag in next iteration
+                
             # ===================================================================
             # TRẠNG THÁI 1: ĐANG BÁM LINE (DRIVING_STRAIGHT)
             # ===================================================================
@@ -908,6 +922,28 @@ class JetBotController:
         
         cross_line_center = best_candidate['center_x']
         return True, confidence_level, cross_line_center
+    
+    def detect_red_flag(self, image):
+        """
+        Detect red flag covering camera
+        Returns True if red flag is detected, False otherwise
+        """
+        if image is None:
+            return False
+            
+        # Convert BGR to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Create mask for red color
+        mask = cv2.inRange(hsv, self.FLAG_RED_LOWER, self.FLAG_RED_UPPER)
+        
+        # Calculate coverage percentage
+        total_pixels = image.shape[0] * image.shape[1]
+        red_pixels = cv2.countNonZero(mask)
+        coverage_ratio = red_pixels / total_pixels
+        
+        # Return True if coverage exceeds threshold
+        return coverage_ratio > self.FLAG_COVERAGE_THRESHOLD
     
     def check_camera_lidar_intersection(self):
         """
