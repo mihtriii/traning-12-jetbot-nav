@@ -182,8 +182,8 @@ class JetBotController:
         self.CAMERA_LIDAR_INTERSECTION_MODE = True  # Enable camera-first detection
         self.CROSS_DETECTION_ROI_Y_PERCENT = 0.45   # Extended from 0.50 to 0.45 - detect earlier
         self.CROSS_DETECTION_ROI_H_PERCENT = 0.30   # Extended from 0.20 to 0.30 - larger detection area
-        self.CROSS_MIN_ASPECT_RATIO = 1.5           # Reduced from 2.0 to 1.5 - catch thinner cross lines
-        self.CROSS_MIN_WIDTH_RATIO = 0.3            # Reduced from 0.4 to 0.3 - catch shorter cross lines
+        self.CROSS_MIN_ASPECT_RATIO = 1.2           # Reduced from 1.5 to 1.2 - catch even thinner cross lines
+        self.CROSS_MIN_WIDTH_RATIO = 0.25           # Reduced from 0.3 to 0.25 - catch even shorter cross lines
         self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
 
     def initialize_hardware(self):
@@ -823,7 +823,7 @@ class JetBotController:
             is_horizontal = aspect_ratio > self.CROSS_MIN_ASPECT_RATIO
             is_wide_enough = width_ratio > self.CROSS_MIN_WIDTH_RATIO
             is_not_too_tall = height_ratio < self.CROSS_MAX_HEIGHT_RATIO
-            is_big_enough = area > 50  # Minimum area threshold
+            is_big_enough = area > 30  # Reduced from 50 to 30 - catch smaller cross lines
             
             if is_horizontal and is_wide_enough and is_not_too_tall and is_big_enough:
                 # Calculate more detailed properties
@@ -894,9 +894,9 @@ class JetBotController:
         
         # === ENHANCED CONFIDENCE ASSESSMENT ===
         confidence_level = "LOW"
-        if best_score > 0.6:
+        if best_score > 0.55:  # Reduced from 0.6 to 0.55
             confidence_level = "HIGH"
-        elif best_score > 0.35:
+        elif best_score > 0.25:  # Reduced from 0.35 to 0.25 for better detection
             confidence_level = "MEDIUM"
         
         # Additional confidence boost for very horizontal lines
@@ -949,6 +949,11 @@ class JetBotController:
             if self.detector.process_detection():
                 rospy.loginfo("✅ INTERSECTION CONFIRMED: Both camera and LiDAR detected intersection!")
                 rospy.loginfo("📡 LiDAR confirmed camera's intersection detection")
+                rospy.loginfo("🛑 IMMEDIATE STOP: Robot stopping due to intersection confirmation")
+                
+                # DỪNG NGAY LẬP TỨC khi LiDAR confirm
+                if hasattr(self, 'robot') and self.robot:
+                    self.robot.stop()
                 
                 # Reset flags
                 self.reset_intersection_detection()
