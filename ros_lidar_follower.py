@@ -558,18 +558,19 @@ class JetBotController:
             # TRẠNG THÁI KẾT THÚC (DEAD_END, GOAL_REACHED)
             # ===================================================================
             elif self.current_state == RobotState.DEAD_END:
-                rospy.logwarn("Đã vào ngõ cụt hoặc gặp lỗi không thể phục hồi. Dừng hoạt động."); self.robot.stop(); break
-            elif self.current_state == RobotState.GOAL_REACHED: 
-                rospy.loginfo("🎯 ĐÃ HOÀN THÀNH NHIỆM VỤ - Chờ cờ đỏ để restart...")
-                self.robot.stop()
-                
-                # Tiếp tục check cờ đỏ để có thể restart
+                rospy.logwarn("Đã vào ngõ cụt hoặc gặp lỗi không thể phục hồi. Dừng hoạt động."); self.robot.stop(); 
+                                # Tiếp tục check cờ đỏ để có thể restart
                 if self.latest_image is not None and self.detect_red_flag(self.latest_image):
                     rospy.loginfo("🚩 PHÁT HIỆN CỜ ĐỎ SAU KHI HOÀN THÀNH - RESTART TOÀN BỘ!")
                     # Reset hoàn toàn về trạng thái ban đầu
                     self.reset_robot_to_initial_state()
                     time.sleep(1.0)
                     continue  # Restart from beginning
+            elif self.current_state == RobotState.GOAL_REACHED: 
+                rospy.loginfo("🎯 ĐÃ HOÀN THÀNH NHIỆM VỤ - Chờ cờ đỏ để restart...")
+                self.robot.stop()
+                
+
                 
                 # Không break, chỉ log định kỳ để biết robot đang chờ
                 rospy.loginfo_throttle(5, "⏳ Nhiệm vụ hoàn tất - Đợi cờ đỏ để restart...")
