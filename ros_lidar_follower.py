@@ -213,10 +213,18 @@ class JetBotController:
             
             if self.flag_detected_count >= self.FLAG_CHECK_FRAMES:
                 if not self.WAITING_FOR_FLAG_REMOVAL:
-                    rospy.logwarn("🚩 CỜ ĐỎ PHÁT HIỆN! Robot dừng lại và chờ cờ được phất để bắt đầu...")
+                    rospy.logwarn("🚩 CỜ ĐỎ PHÁT HIỆN! Robot dừng hoàn toàn và chờ cờ được phất...")
+                    # Đảm bảo robot dừng ngay lập tức
+                    self.robot.stop()
                     self.WAITING_FOR_FLAG_REMOVAL = True
                 
-                rospy.logwarn_throttle(2, "⏳ Đang chờ cờ đỏ được phất để bắt đầu tìm line...")
+                # Robot bị khóa hoàn toàn khi có cờ che
+                rospy.logwarn_throttle(2, "⏳ CAMERA BỊ CHE! Robot đang chờ cờ đỏ được phất...")
+                self.robot.stop()  # Đảm bảo robot dừng
+                
+                # Sleep 2 giây để recheck như yêu cầu
+                rospy.loginfo_throttle(5, "💤 Sleep 2s để recheck camera...")
+                time.sleep(2.0)
                 return False  # Dừng robot
         else:
             # Không có cờ che
@@ -226,14 +234,17 @@ class JetBotController:
             if self.WAITING_FOR_FLAG_REMOVAL:
                 if self.flag_clear_count >= self.FLAG_CLEAR_FRAMES:
                     # Cờ đỏ đã được phất, bắt đầu tìm line
-                    rospy.loginfo("✅ CỜ ĐỎ ĐÃ ĐƯỢC PHẤT! Bắt đầu tìm kiếm line...")
+                    rospy.loginfo("✅ CỜ ĐỎ ĐÃ ĐƯỢC PHẤT! Camera sạch, bắt đầu tìm kiếm line...")
                     self.WAITING_FOR_FLAG_REMOVAL = False
                     # Từ bây giờ chỉ cần kiểm tra line, không cần kiểm tra cờ nữa
+                else:
+                    rospy.loginfo_throttle(2, f"⏳ Đang xác nhận cờ đã phất... ({self.flag_clear_count}/{self.FLAG_CLEAR_FRAMES})")
+                    return False  # Vẫn chờ xác nhận
                     
                 # Sau khi cờ được phất, chỉ kiểm tra line
                 line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
                 if line_center is not None:
-                    rospy.loginfo("🎯 LINE DETECTED! Robot tiếp tục hoạt động...")
+                    rospy.loginfo("🎯 LINE DETECTED! Robot được phép tiếp tục hoạt động...")
                     return True
                 else:
                     rospy.loginfo_throttle(2, "🔍 Đang tìm kiếm line...")
@@ -246,8 +257,8 @@ class JetBotController:
                 else:
                     rospy.loginfo_throttle(3, "⏳ Đang chờ detect line để tiếp tục...")
                     return False  # Không có line, dừng lại
-        
-        return True
+                    
+        return False  # Trường hợp mặc định là dừng an toàn
 
     def enable_flag_detection(self):
         """
