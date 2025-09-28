@@ -178,6 +178,7 @@ class JetBotController:
     def check_flag_status_and_wait(self):
         """
         Kiểm tra trạng thái cờ và xử lý logic chờ đợi.
+        Logic: Phất cờ để bắt đầu, hold cho đến khi thấy line
         Returns: True nếu robot được phép tiếp tục, False nếu cần dừng
         """
         if not self.FLAG_DETECTION_ENABLED:
@@ -195,10 +196,10 @@ class JetBotController:
             
             if self.flag_detected_count >= self.FLAG_CHECK_FRAMES:
                 if not self.WAITING_FOR_FLAG_REMOVAL:
-                    rospy.logwarn("🚩 CỜ PHÁT HIỆN! Robot dừng lại và chờ cờ được phất...")
+                    rospy.logwarn("🚩 CỜ PHÁT HIỆN! Robot dừng lại và chờ cờ được phất để bắt đầu...")
                     self.WAITING_FOR_FLAG_REMOVAL = True
                 
-                rospy.logwarn_throttle(2, "⏳ Đang chờ cờ được phất...")
+                rospy.logwarn_throttle(2, "⏳ Đang chờ cờ được phất để bắt đầu tìm line...")
                 return False  # Dừng robot
         else:
             # Không có cờ che
@@ -207,20 +208,27 @@ class JetBotController:
             
             if self.WAITING_FOR_FLAG_REMOVAL:
                 if self.flag_clear_count >= self.FLAG_CLEAR_FRAMES:
-                    # Kiểm tra xem có detect được line không trước khi tiếp tục
-                    line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
-                    if line_center is not None:
-                        rospy.loginfo("✅ CỜ ĐÃ ĐƯỢC PHẤT & LINE DETECTED! Robot tiếp tục hoạt động...")
-                        self.WAITING_FOR_FLAG_REMOVAL = False
-                        return True
-                    else:
-                        rospy.logwarn_throttle(2, "⏳ Cờ đã phất nhưng chưa detect được line, tiếp tục chờ...")
-                        return False
+                    # Cờ đã được phất, bắt đầu tìm line
+                    rospy.loginfo("✅ CỜ ĐÃ ĐƯỢC PHẤT! Bắt đầu tìm kiếm line...")
+                    self.WAITING_FOR_FLAG_REMOVAL = False
+                    # Từ bây giờ chỉ cần kiểm tra line, không cần kiểm tra cờ nữa
+                    
+                # Sau khi cờ được phất, chỉ kiểm tra line
+                line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+                if line_center is not None:
+                    rospy.loginfo("🎯 LINE DETECTED! Robot tiếp tục hoạt động...")
+                    return True
                 else:
-                    rospy.loginfo_throttle(2, f"⏳ Cờ đã phất, đang xác nhận... ({self.flag_clear_count}/{self.FLAG_CLEAR_FRAMES})")
+                    rospy.loginfo_throttle(2, "🔍 Đang tìm kiếm line...")
                     return False
             else:
-                return True  # Không có cờ và không trong trạng thái chờ
+                # Không trong trạng thái chờ cờ, kiểm tra line bình thường
+                line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+                if line_center is not None:
+                    return True  # Có line, cho phép tiếp tục
+                else:
+                    rospy.loginfo_throttle(3, "⏳ Đang chờ detect line để tiếp tục...")
+                    return False  # Không có line, dừng lại
         
         return True
 
@@ -258,8 +266,32 @@ class JetBotController:
             'enabled': self.FLAG_DETECTION_ENABLED,
             'waiting_for_removal': self.WAITING_FOR_FLAG_REMOVAL,
             'detected_count': self.flag_detected_count,
-            'clear_count': self.flag_clear_count
+            'clear_count': self.flag_clear_count,
+            'line_search_mode': self.LINE_SEARCH_MODE
         }
+
+    def enable_line_search_mode(self):
+        """
+        🔍 Bật chế độ tìm kiếm line (robot dừng cho đến khi thấy line)
+        """
+        self.LINE_SEARCH_MODE = True
+        rospy.loginfo("🔍 LINE SEARCH MODE ENABLED: Robot sẽ hold cho đến khi thấy line")
+        
+    def disable_line_search_mode(self):
+        """
+        🚫 Tắt chế độ tìm kiếm line (robot hoạt động bình thường)
+        """
+        self.LINE_SEARCH_MODE = False
+        rospy.loginfo("🚫 LINE SEARCH MODE DISABLED: Robot hoạt động bình thường")
+        
+    def force_start_without_flag(self):
+        """
+        🚀 Ép buộc robot bắt đầu mà không cần chờ cờ
+        """
+        self.WAITING_FOR_FLAG_REMOVAL = False
+        self.flag_detected_count = 0
+        self.flag_clear_count = 0
+        rospy.loginfo("🚀 FORCE START: Robot bỏ qua chờ cờ và bắt đầu hoạt động")
 
     def setup_parameters(self):
         self.WIDTH, self.HEIGHT = 300, 300
@@ -291,6 +323,7 @@ class JetBotController:
         self.WAITING_FOR_FLAG_REMOVAL = False       # Trạng thái đang chờ cờ được phất
         self.flag_detected_count = 0                # Counter cho flag detection
         self.flag_clear_count = 0                   # Counter cho flag clear detection
+        self.LINE_SEARCH_MODE = True                # Chế độ hold cho đến khi thấy line
         self.YOLO_MODEL_PATH = "models/best.onnx"
         self.YOLO_CONF_THRESHOLD = 0.6
         self.YOLO_INPUT_SIZE = (640, 640)
