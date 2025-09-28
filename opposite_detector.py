@@ -10,6 +10,7 @@ import time
 import json
 import math
 
+
 class SimpleOppositeDetector:
     def __init__(self):
         # Các tham số cố định
