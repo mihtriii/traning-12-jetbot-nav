@@ -1095,8 +1095,8 @@ class JetBotController:
         self.waiting_for_lidar_confirmation = False
     
     def reset_robot_to_initial_state(self):
-        """Reset robot về trạng thái ban đầu để chạy lại từ đầu."""
-        rospy.loginfo("🔄 RESETTING ROBOT TO INITIAL STATE...")
+        """Reset robot về trạng thái ban đầu hoàn toàn, bao gồm cả vị trí node."""
+        rospy.loginfo("🔄 RESETTING ROBOT TO COMPLETE INITIAL STATE...")
         
         # Stop robot immediately
         self.robot.stop()
@@ -1111,10 +1111,19 @@ class JetBotController:
         # Reset line validation
         self.line_validation_attempts = 0
         
+        # ===== RESET VỊ TRÍ VỀ ĐỈNH BAN ĐẦU =====
+        self.current_node_id = self.navigator.start_node
+        self.target_node_id = None
+        self.banned_edges = []  # Clear banned edges
+        
+        # Re-plan initial route from start
+        rospy.loginfo(f"🗺️ RESETTING POSITION: Back to start node {self.navigator.start_node}")
+        self.plan_initial_route()
+        
         # Reset to initial driving state
         self._set_state(RobotState.DRIVING_STRAIGHT, initial=True)
         
-        rospy.loginfo("✨ Robot reset completed - ready to wait for initial red flag!")
+        rospy.loginfo("✨ Complete reset completed - robot back to start node and ready to wait for initial red flag!")
     
     def move_forward_briefly(self):
         """
