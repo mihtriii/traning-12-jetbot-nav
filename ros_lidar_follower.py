@@ -497,9 +497,9 @@ class JetBotController:
                         if abs(error) > 0:
                             # Điều chỉnh nhẹ về phía line
                             adj = np.clip(error / (self.WIDTH / 2) * 0.3, -0.1, 0.1)
-                            self.robot.set_motors(self.BASE_SPEED * 0.5 + adj, self.BASE_SPEED * 0.5 - adj)
+                            self.robot.set_motors(self.BASE_SPEED * 0.3 + adj, self.BASE_SPEED * 0.3 - adj)
                         else:
-                            self.robot.set_motors(self.BASE_SPEED * 0.5, self.BASE_SPEED * 0.5)
+                            self.robot.set_motors(self.BASE_SPEED * 0.3, self.BASE_SPEED * 0.3)
                     else:
                         self.robot.stop()
                 
