@@ -186,10 +186,12 @@ class JetBotController:
         self.CROSS_MIN_WIDTH_RATIO = 0.25           # Reduced from 0.3 to 0.25 - catch even shorter cross lines
         self.CROSS_MAX_HEIGHT_RATIO = 0.8           # Height ratio tối đa so với ROI
         
-        # Flag detection parameters
-        self.FLAG_RED_LOWER = np.array([0, 100, 100])
-        self.FLAG_RED_UPPER = np.array([10, 255, 255])
-        self.FLAG_COVERAGE_THRESHOLD = 0.3  # 30% of image covered to be considered flag
+        # Flag detection parameters - Improved for better red detection
+        self.FLAG_RED_LOWER1 = np.array([0, 50, 50])     # Lower red range
+        self.FLAG_RED_UPPER1 = np.array([10, 255, 255])
+        self.FLAG_RED_LOWER2 = np.array([170, 50, 50])   # Upper red range  
+        self.FLAG_RED_UPPER2 = np.array([180, 255, 255])
+        self.FLAG_COVERAGE_THRESHOLD = 0.15  # Reduced from 0.3 to 0.15 for easier detection
 
     def initialize_hardware(self):
         try:
@@ -925,7 +927,7 @@ class JetBotController:
     
     def detect_red_flag(self, image):
         """
-        Detect red flag covering camera
+        Detect red flag covering camera with improved red detection
         Returns True if red flag is detected, False otherwise
         """
         if image is None:
@@ -934,16 +936,64 @@ class JetBotController:
         # Convert BGR to HSV
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Create mask for red color
-        mask = cv2.inRange(hsv, self.FLAG_RED_LOWER, self.FLAG_RED_UPPER)
+        # Create masks for both red ranges (red color wraps around in HSV)
+        mask1 = cv2.inRange(hsv, self.FLAG_RED_LOWER1, self.FLAG_RED_UPPER1)  # Lower red range
+        mask2 = cv2.inRange(hsv, self.FLAG_RED_LOWER2, self.FLAG_RED_UPPER2)  # Upper red range
+        
+        # Combine both masks
+        red_mask = cv2.bitwise_or(mask1, mask2)
+        
+        # Apply morphological operations to clean up the mask
+        kernel = np.ones((3,3), np.uint8)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)  # Fill small gaps
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)   # Remove noise
         
         # Calculate coverage percentage
         total_pixels = image.shape[0] * image.shape[1]
-        red_pixels = cv2.countNonZero(mask)
+        red_pixels = cv2.countNonZero(red_mask)
         coverage_ratio = red_pixels / total_pixels
+        
+        # Debug log (can be removed later)
+        if coverage_ratio > 0.05:  # Log if there's any significant red detected
+            rospy.loginfo(f"🚩 Red detection: {coverage_ratio:.3f} coverage (threshold: {self.FLAG_COVERAGE_THRESHOLD})")
         
         # Return True if coverage exceeds threshold
         return coverage_ratio > self.FLAG_COVERAGE_THRESHOLD
+    
+    def test_flag_detection_visual(self, image, show_debug=True):
+        """
+        Test flag detection with visual feedback for debugging
+        """
+        if image is None:
+            return False, 0.0
+            
+        # Convert BGR to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        
+        # Create masks for both red ranges
+        mask1 = cv2.inRange(hsv, self.FLAG_RED_LOWER1, self.FLAG_RED_UPPER1)
+        mask2 = cv2.inRange(hsv, self.FLAG_RED_LOWER2, self.FLAG_RED_UPPER2)
+        red_mask = cv2.bitwise_or(mask1, mask2)
+        
+        # Apply morphological operations
+        kernel = np.ones((3,3), np.uint8)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+        
+        # Calculate coverage
+        total_pixels = image.shape[0] * image.shape[1]
+        red_pixels = cv2.countNonZero(red_mask)
+        coverage_ratio = red_pixels / total_pixels
+        
+        if show_debug:
+            # Show debug windows (comment out in production)
+            cv2.imshow("Original", image)
+            cv2.imshow("Red Mask", red_mask)
+            cv2.imshow("HSV", hsv)
+            cv2.waitKey(1)
+            rospy.loginfo(f"Flag detection test: Coverage={coverage_ratio:.4f}, Threshold={self.FLAG_COVERAGE_THRESHOLD}")
+        
+        return coverage_ratio > self.FLAG_COVERAGE_THRESHOLD, coverage_ratio
     
     def check_camera_lidar_intersection(self):
         """
