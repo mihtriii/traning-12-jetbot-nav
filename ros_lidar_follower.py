@@ -45,6 +45,7 @@ class JetBotController:
 
         self.navigator = MapNavigator(self.MAP_FILE_PATH)
         self.current_node_id = self.navigator.start_node
+        print(f"Start Node: {self.navigator.start_node}, End Node: {self.navigator.end_node}, Load Nodes: {self.navigator.load_note}")
         self.target_node_id = None
         self.planned_path = None
         self.banned_edges = []
