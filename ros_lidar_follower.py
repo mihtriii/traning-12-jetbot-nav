@@ -65,6 +65,10 @@ class JetBotController:
         self.waiting_for_lidar_confirmation = False
         self.lidar_confirmation_timeout = 4.0  # 4 seconds to wait for LiDAR
         
+        # Flag-based start control
+        self.initial_red_flag_detected = False  # Track if red flag was detected at start
+        self.robot_started = False              # Track if robot has started moving
+        
         rospy.Subscriber('/scan', LaserScan, self.detector.callback)
         rospy.Subscriber('/csi_cam_0/image_raw', Image, self.camera_callback)
         rospy.loginfo("Đã đăng ký vào các topic /scan và /csi_cam_0/image_raw.")
@@ -360,10 +364,40 @@ class JetBotController:
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
             # ===================================================================
-            # FLAG CHECK: Kiểm tra cờ đỏ - robot chỉ chạy khi không có cờ
+            # INITIAL FLAG CHECK: Đợi red flag lần đầu để bắt đầu
             # ===================================================================
-            if self.latest_image is not None and self.detect_red_flag(self.latest_image):
-                rospy.loginfo("🚩 PHÁT HIỆN CỜ ĐỎ - Robot đang chờ cờ được phất...")
+            if not self.robot_started:
+                if self.latest_image is not None:
+                    if self.detect_red_flag(self.latest_image):
+                        if not self.initial_red_flag_detected:
+                            rospy.loginfo("🚩 PHÁT HIỆN CỜ ĐỎ LẦN ĐẦU - Đã sẵn sàng để bắt đầu!")
+                            self.initial_red_flag_detected = True
+                        # Vẫn chờ cho đến khi cờ được phất (không có red flag)
+                        rospy.loginfo("🚩 Cờ vẫn còn - đợi phất cờ để bắt đầu...")
+                        self.robot.stop()
+                        time.sleep(1.0)
+                        continue
+                    elif self.initial_red_flag_detected:
+                        # Red flag đã được detect lần đầu và giờ không còn nữa - bắt đầu!
+                        rospy.loginfo("✅ CỜ ĐÃ ĐƯỢC PHẤT - Bắt đầu chạy!")
+                        self.robot_started = True
+                    else:
+                        # Chưa thấy red flag lần đầu - chờ
+                        rospy.loginfo_throttle(3, "⏳ Đợi phát hiện cờ đỏ lần đầu để bắt đầu...")
+                        self.robot.stop()
+                        rate.sleep()
+                        continue
+                else:
+                    rospy.logwarn_throttle(5, "Đang chờ dữ liệu camera...")
+                    self.robot.stop()
+                    rate.sleep()
+                    continue
+            
+            # ===================================================================
+            # RUNTIME FLAG CHECK: Kiểm tra cờ đỏ khi đang chạy - hold 2s nếu thấy
+            # ===================================================================
+            if self.robot_started and self.latest_image is not None and self.detect_red_flag(self.latest_image):
+                rospy.loginfo("🚩 PHÁT HIỆN CỜ ĐỎ KHI ĐANG CHẠY - Hold 2 giây...")
                 self.robot.stop()
                 time.sleep(2.0)  # Hold 2 seconds
                 continue  # Recheck flag in next iteration
