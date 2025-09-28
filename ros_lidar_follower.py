@@ -373,8 +373,8 @@ class JetBotController:
 
         self.CORRECTION_GAIN = 0.5
         self.SAFE_ZONE_PERCENT = 0.3
-        self.LINE_COLOR_LOWER = np.array([0, 0, 0])
-        self.LINE_COLOR_UPPER = np.array([180, 255, 120])  # Increased Value from 75 to 120 for better black line detection
+        self.LINE_COLOR_LOWER = np.array([0, 0, 0])      # HSV lower bound cho line đen
+        self.LINE_COLOR_UPPER = np.array([180, 255, 150])  # Tăng Value từ 120 lên 150 để xử lý ánh sáng chói
         self.INTERSECTION_CLEARANCE_DURATION = 1.5
         self.INTERSECTION_APPROACH_DURATION = 0.5
         self.LINE_REACQUIRE_TIMEOUT = 3.0
@@ -1355,6 +1355,54 @@ class JetBotController:
         # Reset để tránh tác động từ các tham số cũ
         self.reset_pid()
         rospy.loginfo(f"🎛️ PID Tuned: KP={self.KP}, KI={self.KI}, KD={self.KD}")
+        
+    def adjust_line_detection(self, lower_value=None, upper_value=None):
+        """
+        🌟 Điều chỉnh tham số phát hiện line để xử lý ánh sáng chói
+        Usage: adjust_line_detection(upper_value=180) để xử lý ánh sáng chói mạnh hơn
+        """
+        if lower_value is not None:
+            self.LINE_COLOR_LOWER[2] = lower_value  # Chỉ thay đổi Value channel
+            rospy.loginfo(f"🔧 Updated LINE_COLOR_LOWER Value = {lower_value}")
+            
+        if upper_value is not None:
+            self.LINE_COLOR_UPPER[2] = upper_value  # Chỉ thay đổi Value channel
+            rospy.loginfo(f"🔧 Updated LINE_COLOR_UPPER Value = {upper_value}")
+        
+        rospy.loginfo(f"🌟 Line Detection Parameters: Lower HSV={self.LINE_COLOR_LOWER}, Upper HSV={self.LINE_COLOR_UPPER}")
+        
+    def test_line_detection_with_glare(self):
+        """
+        🧪 Test khác nhau cho xử lý ánh sáng chói
+        """
+        if self.latest_image is None:
+            rospy.logwarn("Không có ảnh để test!")
+            return
+            
+        rospy.loginfo("🧪 Testing line detection với các tham số khác nhau...")
+        
+        # Test với các giá trị Value khác nhau
+        test_values = [120, 150, 180, 200]
+        
+        for value in test_values:
+            # Backup original
+            original_upper = self.LINE_COLOR_UPPER.copy()
+            
+            # Apply test value
+            self.LINE_COLOR_UPPER[2] = value
+            
+            # Test detection
+            line_center = self._get_line_center(self.latest_image, self.ROI_Y, self.ROI_H)
+            
+            if line_center is not None:
+                rospy.loginfo(f"✅ Value={value}: Line detected at x={line_center}")
+            else:
+                rospy.loginfo(f"❌ Value={value}: No line detected")
+            
+            # Restore original
+            self.LINE_COLOR_UPPER = original_upper
+            
+        rospy.loginfo("🧪 Line detection test hoàn thành!")
         
     def get_line_following_stats(self):
         """📊 Lấy thống kê hiệu suất line following"""
