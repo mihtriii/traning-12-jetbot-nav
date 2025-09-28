@@ -131,12 +131,12 @@ class JetBotController:
                 # Vẽ một đường thẳng đứng màu đỏ tại vị trí trọng tâm
                 cv2.line(debug_frame, (line_center, self.ROI_Y), (line_center, self.ROI_Y + self.ROI_H), (0, 0, 255), 2)
 
-        # 4. Vẽ thông tin Flag Detection
+        # 4. Vẽ thông tin Red Flag Detection
         if self.FLAG_DETECTION_ENABLED:
             y_offset = 60
             flag_status = "WAITING" if self.WAITING_FOR_FLAG_REMOVAL else "MONITORING"
             flag_color = (0, 255, 255) if self.WAITING_FOR_FLAG_REMOVAL else (0, 255, 0)  # Yellow if waiting, Green if monitoring
-            flag_text = f"Flag: {flag_status}"
+            flag_text = f"Red Flag: {flag_status}"
             cv2.putText(debug_frame, flag_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, flag_color, 1, cv2.LINE_AA)
             
             # Vẽ counters
@@ -148,30 +148,47 @@ class JetBotController:
 
     def detect_flag_covering_camera(self, image):
         """
-        Phát hiện cờ che camera bằng cách kiểm tra độ tối của ảnh.
-        Returns: True nếu camera bị che bởi cờ
+        Phát hiện cờ đỏ che camera bằng cách kiểm tra màu đỏ trong ảnh.
+        Returns: True nếu camera bị che bởi cờ đỏ
         """
         if image is None:
             return False
             
-        # Chuyển ảnh sang grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # Chuyển ảnh sang HSV để detect màu đỏ tốt hơn
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Tính độ sáng trung bình
-        mean_brightness = np.mean(gray)
+        # Tạo mask cho màu đỏ (màu đỏ có 2 range trong HSV)
+        # Range 1: 0-10 (đỏ nhạt)
+        mask1 = cv2.inRange(hsv, self.FLAG_RED_LOWER, self.FLAG_RED_UPPER)
+        # Range 2: 160-180 (đỏ đậm)
+        mask2 = cv2.inRange(hsv, self.FLAG_RED_LOWER2, self.FLAG_RED_UPPER2)
         
-        # Đếm số pixel tối
-        dark_pixels = np.sum(gray < self.FLAG_DARKNESS_THRESHOLD)
-        total_pixels = gray.shape[0] * gray.shape[1]
-        dark_ratio = dark_pixels / total_pixels
+        # Kết hợp 2 masks
+        red_mask = cv2.bitwise_or(mask1, mask2)
         
-        # Xác định có cờ che không
-        is_covered = (mean_brightness < self.FLAG_DARKNESS_THRESHOLD and 
-                     dark_ratio > self.FLAG_COVERAGE_RATIO_THRESHOLD)
+        # Làm mịn mask để loại bỏ noise
+        kernel = np.ones((5,5), np.uint8)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
+        
+        # Tính tỷ lệ pixel đỏ
+        red_pixels = np.sum(red_mask > 0)
+        total_pixels = image.shape[0] * image.shape[1]
+        red_ratio = red_pixels / total_pixels
+        
+        # Tìm contours để kiểm tra diện tích vùng đỏ lớn nhất
+        _, contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        max_area = 0
+        if contours:
+            max_area = max([cv2.contourArea(c) for c in contours])
+        
+        # Xác định có cờ đỏ che không
+        is_covered = (red_ratio > self.FLAG_COVERAGE_RATIO_THRESHOLD and 
+                     max_area > self.FLAG_MIN_AREA_THRESHOLD)
         
         if self.FLAG_DETECTION_ENABLED:
-            rospy.loginfo_throttle(1, f"Flag Detection: brightness={mean_brightness:.1f}, "
-                                    f"dark_ratio={dark_ratio:.3f}, covered={is_covered}")
+            rospy.loginfo_throttle(1, f"Red Flag Detection: red_ratio={red_ratio:.3f}, "
+                                    f"max_area={max_area:.0f}, covered={is_covered}")
         
         return is_covered
 
@@ -196,10 +213,10 @@ class JetBotController:
             
             if self.flag_detected_count >= self.FLAG_CHECK_FRAMES:
                 if not self.WAITING_FOR_FLAG_REMOVAL:
-                    rospy.logwarn("🚩 CỜ PHÁT HIỆN! Robot dừng lại và chờ cờ được phất để bắt đầu...")
+                    rospy.logwarn("🚩 CỜ ĐỎ PHÁT HIỆN! Robot dừng lại và chờ cờ được phất để bắt đầu...")
                     self.WAITING_FOR_FLAG_REMOVAL = True
                 
-                rospy.logwarn_throttle(2, "⏳ Đang chờ cờ được phất để bắt đầu tìm line...")
+                rospy.logwarn_throttle(2, "⏳ Đang chờ cờ đỏ được phất để bắt đầu tìm line...")
                 return False  # Dừng robot
         else:
             # Không có cờ che
@@ -208,8 +225,8 @@ class JetBotController:
             
             if self.WAITING_FOR_FLAG_REMOVAL:
                 if self.flag_clear_count >= self.FLAG_CLEAR_FRAMES:
-                    # Cờ đã được phất, bắt đầu tìm line
-                    rospy.loginfo("✅ CỜ ĐÃ ĐƯỢC PHẤT! Bắt đầu tìm kiếm line...")
+                    # Cờ đỏ đã được phất, bắt đầu tìm line
+                    rospy.loginfo("✅ CỜ ĐỎ ĐÃ ĐƯỢC PHẤT! Bắt đầu tìm kiếm line...")
                     self.WAITING_FOR_FLAG_REMOVAL = False
                     # Từ bây giờ chỉ cần kiểm tra line, không cần kiểm tra cờ nữa
                     
@@ -293,6 +310,45 @@ class JetBotController:
         self.flag_clear_count = 0
         rospy.loginfo("🚀 FORCE START: Robot bỏ qua chờ cờ và bắt đầu hoạt động")
 
+    def adjust_red_sensitivity(self, coverage_ratio=None, min_area=None):
+        """
+        🎯 Điều chỉnh độ nhạy phát hiện cờ đỏ
+        Args:
+            coverage_ratio: Tỷ lệ % pixel đỏ cần thiết (0.1-0.8)
+            min_area: Diện tích tối thiểu của vùng đỏ (1000-10000)
+        """
+        if coverage_ratio is not None:
+            self.FLAG_COVERAGE_RATIO_THRESHOLD = max(0.1, min(0.8, coverage_ratio))
+            rospy.loginfo(f"🎯 Red coverage ratio set to: {self.FLAG_COVERAGE_RATIO_THRESHOLD:.2f}")
+            
+        if min_area is not None:
+            self.FLAG_MIN_AREA_THRESHOLD = max(1000, min(20000, min_area))
+            rospy.loginfo(f"🎯 Red min area set to: {self.FLAG_MIN_AREA_THRESHOLD}")
+            
+    def calibrate_red_color(self, h_range=(0, 10), s_min=50, v_min=50):
+        """
+        🌈 Hiệu chỉnh dải màu đỏ để detect
+        Args:
+            h_range: Tuple (min_hue, max_hue) cho màu đỏ chính
+            s_min: Saturation tối thiểu
+            v_min: Value tối thiểu
+        """
+        self.FLAG_RED_LOWER = np.array([h_range[0], s_min, v_min])
+        self.FLAG_RED_UPPER = np.array([h_range[1], 255, 255])
+        rospy.loginfo(f"🌈 Red color range calibrated: H{h_range}, S>{s_min}, V>{v_min}")
+
+    def test_red_detection(self):
+        """
+        🔬 Test màu đỏ detection với ảnh hiện tại
+        """
+        if self.latest_image is None:
+            rospy.logwarn("No image available for red detection test")
+            return
+            
+        result = self.detect_flag_covering_camera(self.latest_image)
+        rospy.loginfo(f"🔬 Red flag detection test result: {result}")
+        return result
+
     def setup_parameters(self):
         self.WIDTH, self.HEIGHT = 300, 300
         self.BASE_SPEED = 0.2
@@ -314,10 +370,14 @@ class JetBotController:
         self.SCAN_PIXEL_THRESHOLD = 100
         self.initialize_motion_flags = True
         
-        # Parameters cho Flag Detection (Phát hiện cờ che camera)
+        # Parameters cho Flag Detection (Phát hiện cờ đỏ che camera)
         self.FLAG_DETECTION_ENABLED = True          # Bật/tắt tính năng phát hiện cờ
-        self.FLAG_DARKNESS_THRESHOLD = 30           # Ngưỡng độ tối để detect cờ che
-        self.FLAG_COVERAGE_RATIO_THRESHOLD = 0.7    # Tỷ lệ % camera bị che để xác định có cờ
+        self.FLAG_RED_LOWER = np.array([0, 50, 50])    # HSV lower bound cho màu đỏ
+        self.FLAG_RED_UPPER = np.array([10, 255, 255]) # HSV upper bound cho màu đỏ (đỏ nhạt)
+        self.FLAG_RED_LOWER2 = np.array([160, 50, 50]) # HSV lower bound cho màu đỏ (đỏ đậm) 
+        self.FLAG_RED_UPPER2 = np.array([180, 255, 255]) # HSV upper bound cho màu đỏ (đỏ đậm)
+        self.FLAG_COVERAGE_RATIO_THRESHOLD = 0.3    # Tỷ lệ % camera bị che màu đỏ để xác định có cờ
+        self.FLAG_MIN_AREA_THRESHOLD = 5000         # Diện tích tối thiểu của vùng đỏ
         self.FLAG_CHECK_FRAMES = 5                  # Số frame liên tiếp để xác nhận có cờ
         self.FLAG_CLEAR_FRAMES = 3                  # Số frame liên tiếp để xác nhận cờ đã được phất
         self.WAITING_FOR_FLAG_REMOVAL = False       # Trạng thái đang chờ cờ được phất
