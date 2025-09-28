@@ -23,10 +23,8 @@ class MapNavigator:
 
     def _load_map(self, map_file_path):
         """Tải và phân tích cú pháp file JSON của bản đồ."""
-        url = "https://hackathon2025-dev.fpt.edu.vn/api/maps/get_active_map"
-        token = "a6f202ada430a9fc154b7707188d7278"
-        
-        response = requests.get(url, params={"token": token, "map_type":"map_z"})
+        url = f"https://hackathon2025-dev.fpt.edu.vn/api/maps/get_active_map/?token=a6f202ada430a9fc154b7707188d7278"
+        response = requests.get(url, params={"map_type":"map_z"})
         data = response.json()
         print(json.dumps(data, indent=2))
 
