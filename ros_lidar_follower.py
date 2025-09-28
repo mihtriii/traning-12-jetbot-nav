@@ -640,12 +640,14 @@ class JetBotController:
                         self.handle_intersection()
                     continue # Bắt đầu vòng lặp mới với trạng thái mới
 
-                # --- BƯỚC 2: LOGIC "NHÌN XA HƠN" VỚI ROI DỰ BÁO - IMPROVED ---
-                # Sử dụng confidence-based intersection detection thay vì simple check
-                is_intersection_detected, confidence_score = self._is_intersection_detected_with_confidence()
+                # --- BƯỚC 2: ENHANCED CROSSROAD DETECTION ---
+                # Sử dụng enhanced crossroad detection kết hợp multiple methods
+                is_crossroad_detected, crossroad_confidence, detection_method = self._enhanced_crossroad_detection()
 
-                if is_intersection_detected:
-                    rospy.logwarn(f"SỰ KIỆN (Dự báo với Confidence): Intersection detected với confidence {confidence_score:.2f}. Chuẩn bị vào giao lộ.")
+                if is_crossroad_detected:
+                    rospy.logwarn(f"🎯 SỰ KIỆN (Enhanced Crossroad): Phát hiện giao lộ ngã tư với confidence {crossroad_confidence:.2f}!")
+                    rospy.loginfo(f"📊 Detection methods: {detection_method}")
+                    
                     # Hành động phòng ngừa: chuyển sang trạng thái đi thẳng vào giao lộ.
                     self._set_state(RobotState.APPROACHING_INTERSECTION)
                     time.sleep(0.3)
@@ -1329,6 +1331,299 @@ class JetBotController:
             'quality': quality,
             'stable': detected and confidence > 0.5
         }
+
+    def _detect_crossroad_by_camera(self, image):
+        """
+        Phát hiện giao lộ ngã tư bằng camera thông qua phân tích multiple line directions.
+        Returns: (is_crossroad, confidence_score, detected_directions)
+        """
+        if image is None:
+            return False, 0.0, []
+            
+        # Phân tích các vùng ROI khác nhau để tìm lines ở nhiều hướng
+        height, width = image.shape[:2]
+        
+        # Define multiple ROI regions để detect lines ở các hướng khác nhau
+        roi_configs = [
+            # Main forward ROI (đã có)
+            {'name': 'forward', 'y': self.ROI_Y, 'h': self.ROI_H, 'x': 0, 'w': width},
+            
+            # Left side ROI - detect line rẽ trái
+            {'name': 'left', 'y': height//3, 'h': height//3, 'x': 0, 'w': width//3},
+            
+            # Right side ROI - detect line rẽ phải  
+            {'name': 'right', 'y': height//3, 'h': height//3, 'x': 2*width//3, 'w': width//3},
+            
+            # Upper ROI - detect line phía trước xa
+            {'name': 'upper', 'y': height//4, 'h': height//4, 'x': width//4, 'w': width//2},
+        ]
+        
+        detected_directions = []
+        total_line_mass = 0
+        
+        for roi_config in roi_configs:
+            roi_result = self._analyze_roi_for_lines(image, roi_config)
+            if roi_result['has_line']:
+                detected_directions.append({
+                    'direction': roi_config['name'],
+                    'confidence': roi_result['confidence'],
+                    'line_mass': roi_result['line_mass'],
+                    'center': roi_result['center']
+                })
+                total_line_mass += roi_result['line_mass']
+        
+        # Crossroad detection logic
+        is_crossroad = False
+        confidence_score = 0.0
+        
+        # Phải có ít nhất 3 directions để coi là crossroad  
+        if len(detected_directions) >= 3:
+            # Check if we have good coverage of different directions
+            direction_names = [d['direction'] for d in detected_directions]
+            
+            # Perfect crossroad: forward + left + right + optional upper
+            if 'forward' in direction_names and 'left' in direction_names and 'right' in direction_names:
+                is_crossroad = True
+                base_confidence = 0.8
+                
+                # Bonus if upper is also detected (T-junction vs full crossroad)
+                if 'upper' in direction_names:
+                    confidence_score = min(base_confidence + 0.1, 1.0)
+                else:
+                    confidence_score = base_confidence
+                    
+                # Adjust confidence based on line quality
+                avg_line_confidence = np.mean([d['confidence'] for d in detected_directions])
+                confidence_score *= avg_line_confidence
+                
+            # Alternative: 3 directions including forward
+            elif 'forward' in direction_names and len(direction_names) >= 3:
+                is_crossroad = True
+                confidence_score = 0.6 * np.mean([d['confidence'] for d in detected_directions])
+        
+        # Additional validation: line mass distribution
+        if is_crossroad and total_line_mass > 0:
+            # Check if line mass is reasonably distributed (not concentrated in one area)
+            mass_distribution = [d['line_mass'] / total_line_mass for d in detected_directions]
+            distribution_score = 1.0 - np.std(mass_distribution)  # Lower std = better distribution
+            confidence_score *= max(0.5, distribution_score)
+        
+        return is_crossroad, confidence_score, detected_directions
+
+    def _analyze_roi_for_lines(self, image, roi_config):
+        """
+        Phân tích một ROI cụ thể để tìm lines và tính chất lượng.
+        Returns: dict with has_line, confidence, line_mass, center
+        """
+        y, h = roi_config['y'], roi_config['h'] 
+        x, w = roi_config.get('x', 0), roi_config.get('w', image.shape[1])
+        
+        # Extract ROI
+        roi = image[y:y+h, x:x+w]
+        
+        # HSV-based line detection
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        color_mask = cv2.inRange(hsv, self.LINE_COLOR_LOWER, self.LINE_COLOR_UPPER)
+        
+        # Adaptive thresholding backup
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        adaptive_thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Combine detection methods
+        combined_mask = cv2.bitwise_or(color_mask, adaptive_thresh)
+        
+        # Morphological operations
+        kernel = np.ones((3, 3), np.uint8)
+        cleaned_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+        
+        # Find contours
+        _, contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return {'has_line': False, 'confidence': 0.0, 'line_mass': 0, 'center': None}
+        
+        # Analyze largest contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_contour)
+        
+        # Calculate confidence based on multiple factors
+        roi_area = h * w
+        area_ratio = area / roi_area
+        
+        # Has line if area is significant
+        has_line = area_ratio > 0.02 and area > 100
+        
+        # Calculate confidence score
+        confidence = 0.0
+        if has_line:
+            # Area factor
+            if 0.05 <= area_ratio <= 0.4:
+                area_confidence = 0.8
+            elif 0.02 <= area_ratio <= 0.6:
+                area_confidence = 0.5
+            else:
+                area_confidence = 0.3
+            
+            # Solidity factor
+            hull = cv2.convexHull(largest_contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = float(area) / hull_area if hull_area > 0 else 0
+            solidity_confidence = min(solidity * 2, 1.0)
+            
+            confidence = (area_confidence + solidity_confidence) / 2
+        
+        # Calculate line center
+        center = None
+        if has_line:
+            M = cv2.moments(largest_contour)
+            if M["m00"] > 0:
+                center_x = int(M["m10"] / M["m00"]) + x  # Adjust for ROI offset
+                center_y = int(M["m01"] / M["m00"]) + y
+                center = (center_x, center_y)
+        
+        return {
+            'has_line': has_line,
+            'confidence': confidence,
+            'line_mass': area,
+            'center': center
+        }
+
+    def _enhanced_crossroad_detection(self):
+        """
+        Tổng hợp method phát hiện crossroad kết hợp camera và confidence tracking.
+        Returns: (is_crossroad, confidence, method_used)
+        """
+        if self.latest_image is None:
+            return False, 0.0, "no_image"
+        
+        # Method 1: Camera-based crossroad detection
+        is_crossroad_cam, cam_confidence, directions = self._detect_crossroad_by_camera(self.latest_image)
+        
+        # Method 2: Enhanced lookahead disappearance (existing method)
+        is_intersection_detected, intersection_confidence = self._is_intersection_detected_with_confidence()
+        
+        # Method 3: LiDAR validation (if available)
+        lidar_detection = False
+        if hasattr(self, 'detector') and self.detector:
+            lidar_detection = self.detector.process_detection() if hasattr(self.detector, 'process_detection') else False
+        
+        # Combine methods with weighted confidence
+        final_confidence = 0.0
+        method_used = []
+        
+        # Camera crossroad detection (high weight for crossroads)
+        if is_crossroad_cam:
+            final_confidence += cam_confidence * 0.6
+            method_used.append(f"camera_crossroad({cam_confidence:.2f})")
+            
+        # Traditional intersection detection (medium weight)
+        if is_intersection_detected:
+            final_confidence += intersection_confidence * 0.3
+            method_used.append(f"lookahead_disappear({intersection_confidence:.2f})")
+            
+        # LiDAR confirmation (bonus weight)
+        if lidar_detection:
+            final_confidence += 0.2
+            method_used.append("lidar_confirm")
+        
+        # Final decision
+        is_final_crossroad = final_confidence > 0.5
+        method_description = " + ".join(method_used) if method_used else "none"
+        
+        # Debug logging
+        if is_final_crossroad:
+            rospy.loginfo(f"🎯 CROSSROAD DETECTED! Confidence: {final_confidence:.2f}, Methods: {method_description}")
+            if directions:
+                direction_summary = [f"{d['direction']}({d['confidence']:.2f})" for d in directions]
+                rospy.loginfo(f"📍 Detected directions: {', '.join(direction_summary)}")
+        
+        return is_final_crossroad, final_confidence, method_description
+
+    def visualize_crossroad_detection(self, image, detected_directions):
+        """
+        Visualize crossroad detection results for debugging.
+        """
+        if image is None or not detected_directions:
+            return image
+            
+        # Create a copy for visualization
+        vis_image = image.copy()
+        
+        # Draw detected lines and directions
+        for direction in detected_directions:
+            if direction['center']:
+                center = direction['center']
+                confidence = direction['confidence']
+                direction_name = direction['direction']
+                
+                # Color mapping for different directions
+                color_map = {
+                    'forward': (0, 255, 0),    # Green
+                    'left': (255, 0, 0),       # Blue
+                    'right': (0, 0, 255),      # Red
+                    'upper': (255, 255, 0)     # Cyan
+                }
+                
+                color = color_map.get(direction_name, (255, 255, 255))
+                
+                # Draw circle at line center
+                cv2.circle(vis_image, center, 8, color, -1)
+                
+                # Draw direction label
+                label = f"{direction_name}: {confidence:.2f}"
+                cv2.putText(vis_image, label, (center[0] - 50, center[1] - 15), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        # Draw ROI rectangles for reference
+        height, width = image.shape[:2]
+        roi_configs = [
+            {'name': 'forward', 'y': self.ROI_Y, 'h': self.ROI_H, 'x': 0, 'w': width, 'color': (0, 255, 0)},
+            {'name': 'left', 'y': height//3, 'h': height//3, 'x': 0, 'w': width//3, 'color': (255, 0, 0)},
+            {'name': 'right', 'y': height//3, 'h': height//3, 'x': 2*width//3, 'w': width//3, 'color': (0, 0, 255)},
+            {'name': 'upper', 'y': height//4, 'h': height//4, 'x': width//4, 'w': width//2, 'color': (255, 255, 0)},
+        ]
+        
+        for roi in roi_configs:
+            cv2.rectangle(vis_image, (roi['x'], roi['y']), 
+                         (roi['x'] + roi['w'], roi['y'] + roi['h']), roi['color'], 2)
+            cv2.putText(vis_image, roi['name'], (roi['x'] + 5, roi['y'] + 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, roi['color'], 1)
+        
+        return vis_image
+
+    def debug_crossroad_detection(self):
+        """
+        Debug method để test crossroad detection và hiển thị kết quả.
+        Gọi method này để kiểm tra crossroad detection.
+        """
+        if self.latest_image is None:
+            rospy.logwarn("Không có image để debug crossroad detection")
+            return
+            
+        # Run crossroad detection
+        is_crossroad, confidence, directions = self._detect_crossroad_by_camera(self.latest_image)
+        
+        rospy.loginfo(f"🔍 DEBUG - Crossroad Detection:")
+        rospy.loginfo(f"  Is Crossroad: {is_crossroad}")
+        rospy.loginfo(f"  Confidence: {confidence:.3f}")
+        rospy.loginfo(f"  Directions detected: {len(directions)}")
+        
+        for i, direction in enumerate(directions):
+            rospy.loginfo(f"    {i+1}. {direction['direction']}: confidence={direction['confidence']:.3f}, mass={direction['line_mass']}")
+        
+        # Create visualization
+        vis_image = self.visualize_crossroad_detection(self.latest_image, directions)
+        
+        # Save debug image (optional)
+        debug_filename = f"/tmp/crossroad_debug_{int(rospy.get_time())}.jpg"
+        cv2.imwrite(debug_filename, vis_image)
+        rospy.loginfo(f"💾 Debug image saved: {debug_filename}")
+        
+        # Show image (uncomment for live debugging)
+        # cv2.imshow("Crossroad Detection Debug", vis_image)
+        # cv2.waitKey(1)
     
     def _is_line_in_valid_range(self, image):
         """
